@@ -1,0 +1,53 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  overflow: hidden;
+  background: #030303;
+  color: white;
+  font-family: Inter, sans-serif;
+}
+
+::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.glass {
+  backdrop-filter: blur(18px);
+  background: rgba(20, 22, 35, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 0 60px rgba(120, 120, 255, 0.16);
+  border-radius: 18px;
+}
+
+.neon {
+  box-shadow: 0 0 25px rgba(125, 85, 255, 0.55),
+              0 0 60px rgba(105, 55, 255, 0.25) inset;
+}
+
+.fade-in {
+  animation: fadeIn 1s ease forwards;
+}
+
+@keyframes fadeIn {
+  0% { opacity: 0; transform: translateY(15px); }
+  100% { opacity: 1; transform: translateY(0px); }
+}
+
+.bg3d {
+  position: fixed !important;
+  top: 0;
+  left: 0;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: -10;
+}
+
+.highlight {
+  color: #8b5cf6;
+  text-shadow: 0 0 8px #8b5cf6;
+}

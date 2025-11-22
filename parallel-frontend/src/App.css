@@ -1,0 +1,26 @@
+.app-container {
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  background: radial-gradient(
+      circle at 20% 20%,
+      rgba(120, 80, 255, 0.15),
+      transparent 40%
+    ),
+    radial-gradient(
+      circle at 80% 80%,
+      rgba(0, 200, 255, 0.15),
+      transparent 40%
+    ),
+    #030303;
+  animation: aurora 12s ease-in-out infinite alternate;
+}
+
+@keyframes aurora {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 100% 50%;
+  }
+}
