@@ -1,19 +1,19 @@
+// src/components/PresenceBar.jsx
 export default function PresenceBar() {
   return (
     <div
       style={{
         width: "100%",
-        height: "60px",
-        background: "#0F0F10",
-        borderBottom: "1px solid #1F1F22",
+        height: "55px",
         display: "flex",
         alignItems: "center",
         paddingLeft: "22px",
-        fontSize: "14px",
-        color: "#7b7b85",
+        color: "#bbb",
+        fontSize: "16px",
+        backdropFilter: "blur(12px)",
       }}
     >
-      Online: Yug, Sean, Severin
+      Online: Yug • Severin • Sean • Nayab
     </div>
   );
 }
