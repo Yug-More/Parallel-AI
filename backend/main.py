@@ -1,4 +1,4 @@
-# backend/main.py
+import os
 import uuid
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
@@ -9,6 +9,15 @@ from pydantic import BaseModel
 
 from config import CLIENTS, OPENAI_MODEL
 from openai import OpenAI
+
+# Which implementation to use:
+#   official -> uses spoon_official.build_team_graph (Spoon OS StateGraph)
+#   local    -> uses spoon_os ask_one/ask_team/synthesize (Windows-friendly)
+SPOON_IMPL = os.getenv("SPOON_IMPL", "local").lower()
+if SPOON_IMPL == "official":
+    from spoon_official import build_team_graph
+else:
+    from spoon_os import ask_one, ask_team, synthesize
 
 # ============================================================
 # Data models / in-memory store (hackathon simple)
@@ -113,7 +122,7 @@ def append_memory_note(room: RoomState, note: str) -> None:
     room.memory_notes.append(f"[{datetime.utcnow().isoformat(timespec='seconds')}] {note}")
 
 def build_system_context(room: RoomState) -> str:
-    # memory_summary is concise; memory_notes is only summarized when asked
+    # memory_summary is concise; memory_notes are only summarized when asked
     return f"""Shared Memory Summary (not auto-shown to users unless asked):
 {room.memory_summary or "(empty yet)"}
 
@@ -133,12 +142,37 @@ SUMMARY_UPDATE:
 """
 
 def chat(client: OpenAI, messages: List[Dict[str, str]], temperature=0.4) -> str:
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=messages,
-        temperature=temperature,
-    )
-    return resp.choices[0].message.content
+    try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            temperature=temperature,
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        detail = str(e)
+        resp = getattr(e, "response", None)
+        if resp:
+            try:
+                detail = resp.json()
+            except Exception:
+                status = getattr(resp, "status_code", "?")
+                detail = f"OpenAI error (status {status}): {e}"
+        raise HTTPException(status_code=502, detail={"provider": "openai", "error": detail})
+
+def run_graph(app_graph, inputs):
+    """
+    Runs a Spoon graph call whether the SDK returns a sync result or a coroutine.
+    """
+    try:
+        res = app_graph.invoke(inputs)
+        if hasattr(res, "__await__"):
+            import asyncio
+            return asyncio.run(res)
+        return res
+    except TypeError:
+        import asyncio
+        return asyncio.run(app_graph.ainvoke(inputs))
 
 # ============================================================
 # Routes
@@ -183,57 +217,99 @@ def ask(room_id: str, payload: AskModeRequest):
     room.messages.append(human)
 
     sys_ctx = build_system_context(room)
+    mode = payload.mode or "self"
 
-    # 2) routing
-    if payload.mode in ("self","teammate"):
-        # target agent required
-        agent_id = payload.target_agent or "yug"
-        agent_name = next((m["name"] for m in TEAM if m["id"] == agent_id), agent_id.title())
+    # 2) routing (official Spoon OS vs. local orchestrator)
+    if SPOON_IMPL == "official":
+        graph = build_team_graph()
 
-        msgs = [
-            {"role":"system","content": sys_ctx},
-            {"role":"user","content": f"{payload.user_name} asks {agent_name}:\n{payload.content}"},
-        ]
-        text = chat(client_for(agent_id), msgs, temperature=0.35)
-        room.messages.append(make_assistant_msg(agent_id, agent_name, text))
+        if mode in ("self", "teammate"):
+            target = payload.target_agent or "yug"
 
-        # update project/memory summaries if suggested
-        if (upd := summary_update_from(text)):
-            room.project_summary = upd
-            room.memory_summary  = upd
-            append_memory_note(room, f"{agent_name} updated summary.")
+            # ask_one
+            graph.set_entry_point("ask_one")
+            app_graph = graph.compile()
+            res = run_graph(app_graph, {
+                "asker": payload.user_name,
+                "prompt": payload.content,
+                "sys_ctx": sys_ctx,
+                "mode": mode,
+                "target": target,
+            })
+            drafts = res["drafts"]
+            room.messages.append(make_assistant_msg(target, target.title(), drafts[target]))
 
-    else:  # mode == "team"
-        # All teammates draft; Nayab synthesizes
-        drafts: Dict[str,str] = {}
-        for member in ["yug","sean","severin","nayab"]:
-            agent_name = next((m["name"] for m in TEAM if m["id"] == member), member.title())
-            msgs = [
-                {"role":"system","content": sys_ctx},
-                {"role":"system","content": f"You are {agent_name}. Provide your perspective."},
-                {"role":"user","content": f"Team question from {payload.user_name}:\n{payload.content}"},
-            ]
-            drafts[member] = chat(client_for(member), msgs, temperature=0.4)
-            room.messages.append(make_assistant_msg(member, agent_name, drafts[member]))
+            # synthesize
+            graph.set_entry_point("synthesize")
+            app_graph = graph.compile()
+            synth = run_graph(app_graph, {
+                "asker": payload.user_name,
+                "prompt": payload.content,
+                "sys_ctx": sys_ctx,
+                "drafts": drafts
+            })["synthesis"]
 
-        # coordinator synthesis (use Nayab key)
-        coord_msgs = [
-            {"role":"system","content": "You are the coordinator. Synthesize drafts into one clear answer with 2–5 next steps."},
-            {"role":"system","content": f"CURRENT PROJECT SUMMARY:\n{room.project_summary or '(none)'}"},
-            {"role":"system","content": sys_ctx},
-            {"role":"user","content": f"Latest human message from {payload.user_name}:\n{payload.content}"},
-        ]
-        for who, text in drafts.items():
-            label = next((m["name"] for m in TEAM if m["id"] == who), who.title())
-            coord_msgs.append({"role":"assistant","content": f"{label} draft:\n{text}"})
+            if (upd := summary_update_from(synth)):
+                room.project_summary = upd
+                room.memory_summary = upd
+                append_memory_note(room, "Coordinator updated summary (from single-ask).")
 
-        synth = chat(client_for("coordinator"), coord_msgs, temperature=0.35)
-        room.messages.append(make_assistant_msg("coordinator","Coordinator", synth))
+        else:  # mode == "team"
+            # ask_team
+            graph.set_entry_point("ask_team")
+            app_graph = graph.compile()
+            res = run_graph(app_graph, {
+                "asker": payload.user_name,
+                "prompt": payload.content,
+                "sys_ctx": sys_ctx,
+            })
+            drafts: Dict[str, str] = res["drafts"]
 
-        if (upd := summary_update_from(synth)):
-            room.project_summary = upd
-            room.memory_summary  = upd
-            append_memory_note(room, "Coordinator updated summary.")
+            for member, text in drafts.items():
+                room.messages.append(make_assistant_msg(member, member.title(), text))
+
+            # synthesize
+            graph.set_entry_point("synthesize")
+            app_graph = graph.compile()
+            synth = run_graph(app_graph, {
+                "asker": payload.user_name,
+                "prompt": payload.content,
+                "sys_ctx": sys_ctx,
+                "drafts": drafts
+            })["synthesis"]
+
+            room.messages.append(make_assistant_msg("coordinator", "Coordinator", synth))
+
+            if (upd := summary_update_from(synth)):
+                room.project_summary = upd
+                room.memory_summary = upd
+                append_memory_note(room, "Coordinator updated summary.")
+
+    else:
+        # Local orchestrator (Windows friendly)
+        if mode in ("self", "teammate"):
+            agent_id = payload.target_agent or "yug"
+            drafts = ask_one(payload.user_name, payload.content, sys_ctx, agent_id)
+            room.messages.append(make_assistant_msg(agent_id, agent_id.title(), drafts[agent_id]))
+
+            synth = synthesize(payload.user_name, payload.content, sys_ctx, drafts)
+            if (upd := summary_update_from(synth)):
+                room.project_summary = upd
+                room.memory_summary = upd
+                append_memory_note(room, "Coordinator updated summary (from single-ask).")
+
+        else:  # mode == "team"
+            drafts = ask_team(payload.user_name, payload.content, sys_ctx)
+            for member, text in drafts.items():
+                room.messages.append(make_assistant_msg(member, member.title(), text))
+
+            synth = synthesize(payload.user_name, payload.content, sys_ctx, drafts)
+            room.messages.append(make_assistant_msg("coordinator", "Coordinator", synth))
+
+            if (upd := summary_update_from(synth)):
+                room.project_summary = upd
+                room.memory_summary = upd
+                append_memory_note(room, "Coordinator updated summary.")
 
     return RoomResponse(
         room_id=room.id,
@@ -264,9 +340,9 @@ def query_memory(room_id: str, payload: MemoryQueryRequest):
     # Simple QA over memory_summary + notes (concatenate for now)
     context = room.memory_summary + "\n\n" + "\n".join(room.memory_notes[-200:])
     msgs = [
-        {"role":"system","content":"You are the project memory. Answer using only the provided memory context."},
-        {"role":"system","content": f"MEMORY CONTEXT:\n{context or '(empty)'}"},
-        {"role":"user","content": f"{payload.user_name} asks: {payload.question}"},
+        {"role": "system", "content": "You are the project memory. Answer using only the provided memory context."},
+        {"role": "system", "content": f"MEMORY CONTEXT:\n{context or '(empty)'}"},
+        {"role": "user", "content": f"{payload.user_name} asks: {payload.question}"},
     ]
     answer = chat(client_for("coordinator"), msgs, temperature=0.2)
     append_memory_note(room, f"Memory was queried: {payload.question}")
