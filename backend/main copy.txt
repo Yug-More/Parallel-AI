@@ -97,6 +97,69 @@ def get_default_client():
         return client
     raise HTTPException(500, "No OpenAI client configured")
 
+def build_system_context(db: Session, room: RoomORM) -> str:
+    """
+    Lightweight shared room context used by all per-user reps.
+
+    - Describes the room + org at a high level
+    - Includes project + memory summaries
+    - Includes a short recent message history (speaker-name tagged)
+    """
+    # Recent memory notes for this room
+    try:
+        memories = list_recent_memories(db, room.id, limit=8)
+    except Exception:
+        memories = []
+
+    mem_text = "\n".join(f"- {m.content}" for m in memories) or "(none)"
+
+    # Last ~10 messages in this room for conversation context
+    recent_msgs = (
+        db.query(MessageORM)
+        .filter(MessageORM.room_id == room.id)
+        .order_by(MessageORM.created_at.desc())
+        .limit(10)
+        .all()
+    )
+    # Reverse so oldest → newest
+    recent_msgs = list(reversed(recent_msgs))
+
+    history_lines = []
+    for m in recent_msgs:
+        sender = m.sender_name or m.sender_id or "unknown"
+        # keep history compact
+        text = (m.content or "").strip()
+        if len(text) > 300:
+            text = text[:297] + "..."
+        history_lines.append(f"{sender}: {text}")
+
+    history_text = "\n".join(history_lines) or "(no recent messages)"
+
+    return f"""
+You are an AI assistant working inside a shared workspace room.
+
+Room:
+- id: {room.id}
+- name: {room.name}
+
+This room belongs to a single organization where multiple human teammates
+each have their own dedicated AI representative. Different humans may share
+this room, but you always act on behalf of the one human you represent
+(the caller will be specified in a separate block).
+
+Project summary for this room:
+{room.project_summary or "(none set yet)"}
+
+Long-term memory summary for this room:
+{room.memory_summary or "(none yet)"}
+
+Recent memory notes:
+{mem_text}
+
+Recent conversation in this room (oldest to newest):
+{history_text}
+""".strip()
+
 
 def build_system_prompt_for_room(
     db: Session,

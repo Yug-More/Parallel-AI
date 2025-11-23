@@ -62,6 +62,13 @@ SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 1440
 
+# Allowed user roles (short-term); can override via env
+ROLE_OPTIONS = [
+    r.strip()
+    for r in os.getenv("ROLE_OPTIONS", "Product,Engineering,Design,Data,Ops,Other").split(",")
+    if r.strip()
+]
+
 # Mock GitHub repo data (until real integration is wired)
 GITHUB_MOCK_FILES = [
     {"path": "README.md", "type": "file"},
@@ -246,29 +253,46 @@ def require_user(request: Request, db: Session) -> UserORM:
 
 def get_or_create_org_for_user(db: Session, user: UserORM) -> OrganizationORM:
     """
-    Force a single shared org for all users. Reuse 'Demo Org' if it exists,
-    otherwise create it once and reuse thereafter.
+    Short-term: single global organization for the whole company.
+
+    - There is exactly one org, e.g. 'Global Org'.
+    - All users are attached to this org via user.org_id.
+    - All rooms are created under this org.
+
+    This matches the enterprise model: one workspace, many teams/rooms.
     """
+
+    # If user already has an org_id, reuse it
+    if getattr(user, "org_id", None):
+        existing = db.get(OrganizationORM, user.org_id)
+        if existing:
+            return existing
+
+    # Look for an existing global org
     org = (
         db.query(OrganizationORM)
-        .filter(OrganizationORM.name == "Demo Org")
+        .filter(OrganizationORM.name == "Global Org")
+        .order_by(OrganizationORM.created_at.asc())
         .first()
     )
-    if org:
-        return org
+    if not org:
+        # Create the global org once
+        org = OrganizationORM(
+            id=str(uuid.uuid4()),
+            name="Global Org",
+            owner_user_id=user.id,
+            created_at=datetime.utcnow(),
+        )
+        db.add(org)
+        db.commit()
+        db.refresh(org)
 
-    org = db.query(OrganizationORM).order_by(OrganizationORM.created_at.asc()).first()
-    if org:
-        return org
+    # Attach user to the global org if column exists
+    if hasattr(user, "org_id") and user.org_id != org.id:
+        user.org_id = org.id
+        db.add(user)
+        db.commit()
 
-    org = OrganizationORM(
-        id=str(uuid.uuid4()),
-        name="Demo Org",
-        owner_user_id=user.id,
-        created_at=datetime.utcnow(),
-    )
-    db.add(org)
-    db.commit()
     return org
 
 
@@ -594,8 +618,6 @@ def get_room(room_id: str, request: Request, db: Session = Depends(get_db)):
     room = ensure_room_access(db, user, room)
     return room_to_response(db, room)
 
-
-
 CANONICAL_ROOMS = {
     "engineering": "Engineering Room",
     "design": "Design Room",
@@ -603,12 +625,8 @@ CANONICAL_ROOMS = {
     "product": "Product Room",
 }
 
-
 @app.get("/rooms/team/{team_label}")
 def get_or_create_team_room(team_label: str, request: Request, db: Session = Depends(get_db)):
-    """
-    Required by new dashboard → resolves canonical team room.
-    """
     user = require_user(request, db)
     org = get_or_create_org_for_user(db, user)
 
@@ -633,11 +651,6 @@ def get_or_create_team_room(team_label: str, request: Request, db: Session = Dep
         db.commit()
 
     return {"room_id": room.id, "room_name": room.name}
-
-
-# ============================================================
-# SSE — STATUS/ERROR STREAM (Fix #11)
-# ============================================================
 
 SUBSCRIBERS = []   # list[(queue, filters {room_id,user_id})]
 
