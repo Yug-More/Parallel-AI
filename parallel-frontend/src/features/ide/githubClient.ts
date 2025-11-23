@@ -32,7 +32,6 @@ let mockFileContent: Record<string, string> = {};
  */
 export async function checkGitHubStatus(): Promise<GitHubStatus> {
   try {
-    // Real implementation would call: GET /api/github/status
     const response = await fetch(`${apiBase}/api/github/status`, {
       method: "GET",
       headers: { "Content-Type": "application/json" },
@@ -107,7 +106,6 @@ export async function listRepositoryFiles(
   path: string = ""
 ): Promise<GitHubFileList> {
   try {
-    // Real implementation would call: GET /api/github/repo/files?path=...
     const response = await fetch(
       `${apiBase}/api/github/repo/files?path=${encodeURIComponent(path)}`,
       {
@@ -139,7 +137,6 @@ export async function listRepositoryFiles(
  */
 export async function getFileContent(path: string): Promise<GitHubFile> {
   try {
-    // Real implementation would call: GET /api/github/repo/file?path=...
     const response = await fetch(
       `${apiBase}/api/github/repo/file?path=${encodeURIComponent(path)}`,
       {
@@ -253,4 +250,3 @@ export async function commitFile(
     commitSha: "mock-commit-sha",
   };
 }
-

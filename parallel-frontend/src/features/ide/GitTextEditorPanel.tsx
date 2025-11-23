@@ -58,6 +58,22 @@ export function GitTextEditorPanel() {
     }
   };
 
+  const useMockRepo = () => {
+    setStatus({
+      connected: true,
+      repoName: "mock-repo",
+      repoOwner: "demo",
+      repoUrl: "https://github.com/demo/mock-repo",
+    });
+    setFiles([
+      { path: "README.md", type: "file" },
+      { path: "docs/plan.md", type: "file" },
+      { path: "src/app.py", type: "file" },
+    ]);
+    setSelectedPath("README.md");
+    setFileContent("# Mock repo\n\nThis is a mock document. Connect GitHub for real content.");
+  };
+
   const handleConnect = async () => {
     setIsConnecting(true);
     setError(null);
@@ -194,13 +210,18 @@ export function GitTextEditorPanel() {
                 {error}
               </motion.div>
             )}
-            <button
-              className="git-connect-btn"
-              onClick={handleConnect}
-              disabled={isConnecting}
-            >
-              {isConnecting ? "Connecting..." : "Connect GitHub"}
-            </button>
+            <div style={{ display: "flex", gap: 12 }}>
+              <button
+                className="git-connect-btn"
+                onClick={handleConnect}
+                disabled={isConnecting}
+              >
+                {isConnecting ? "Connecting..." : "Connect GitHub"}
+              </button>
+              <button className="git-connect-btn ghost" onClick={useMockRepo}>
+                Use mock repo
+              </button>
+            </div>
           </motion.div>
         </div>
       </div>
@@ -323,4 +344,3 @@ export function GitTextEditorPanel() {
     </div>
   );
 }
-

@@ -2,11 +2,9 @@
 # main.py — Fully Rewritten Clean Backend (Part 1 of 3)
 # ============================================================
 
-import os
-import uuid
-import json
+import os, re, uuid, json
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Literal
 
 from fastapi import FastAPI, Request, Response, Depends, HTTPException
@@ -29,6 +27,7 @@ from models import (
     Notification as NotificationORM,
     MemoryRecord as MemoryORM,
     AgentProfile as AgentORM,
+    Task as TaskORM,
 )
 
 from openai import OpenAI
@@ -36,6 +35,11 @@ from config import CLIENTS, OPENAI_MODEL
 from dotenv import load_dotenv
 
 load_dotenv()
+
+import logging
+
+logger = logging.getLogger("parallel-backend")
+logger.setLevel(logging.INFO)
 
 # ============================================================
 # App + CORS
@@ -58,6 +62,20 @@ SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 1440
 
+# Mock GitHub repo data (until real integration is wired)
+GITHUB_MOCK_FILES = [
+    {"path": "README.md", "type": "file"},
+    {"path": "docs/plan.md", "type": "file"},
+    {"path": "src/app.py", "type": "file"},
+    {"path": "src/api/routes.py", "type": "file"},
+]
+GITHUB_MOCK_CONTENT = {
+    "README.md": "# Mock Repo\n\nConnect GitHub to see real content.\n",
+    "docs/plan.md": "# Plan\n\n- [ ] Hook up GitHub OAuth\n- [ ] List files from API\n- [ ] Edit and commit\n",
+    "src/app.py": "print('hello from mock repo')\n",
+    "src/api/routes.py": "# routes placeholder\n",
+}
+
 # ============================================================
 # Utility
 # ============================================================
@@ -69,9 +87,64 @@ def get_db():
     finally:
         db.close()
 
+def get_default_client():
+    # Prefer an explicit "openai" client, fall back to coordinator, then any client
+    if "openai" in CLIENTS:
+        return CLIENTS["openai"]
+    if "coordinator" in CLIENTS:
+        return CLIENTS["coordinator"]
+    for _, client in CLIENTS.items():
+        return client
+    raise HTTPException(500, "No OpenAI client configured")
+
+
+def build_system_prompt_for_room(
+    db: Session,
+    room: RoomORM,
+    user: UserORM,
+    mode: str = "team",
+) -> str:
+    """
+    Build a system prompt for THIS user’s AI representative.
+    The room is shared, but this agent only represents `user`.
+    """
+    base_ctx = build_system_context(db, room)
+
+    rep_block = f"""
+You are the dedicated AI representative for this human teammate:
+
+- name: {user.name or "Unknown"}
+- id: {user.id}
+
+You speak AS their assistant.
+When you say "you", you are talking ONLY to this human.
+Do not treat other teammates' messages as if they were from this user.
+"""
+
+    team_block = """
+The organization may contain many teammates using their own AI reps.
+
+- You may see references to other people (e.g. “Angie”, “z”).
+- Never confuse the current human with their teammates.
+- Refer to teammates as "your teammate Angie", "your teammate z", etc.
+- If the human asks about a teammate, answer from the perspective of THIS human.
+"""
+
+    mode_block = f"Current interaction mode: {mode or 'team'}."
+
+    return f"""{base_ctx}
+
+{rep_block}
+
+{team_block}
+
+{mode_block}
+""".strip()
+
+
 def create_access_token(data: dict, expires_delta: timedelta = None):
     to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=60))
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=60))
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -108,22 +181,26 @@ def require_user(request: Request, db: Session) -> UserORM:
         raise HTTPException(401, "Not authenticated")
     return user
 
-
-# ============================================================
-# ORG LOGIC (Fix #1 & #4)
-# ============================================================
-
 def get_or_create_org_for_user(db: Session, user: UserORM) -> OrganizationORM:
-    existing = (
+    """
+    Force a single shared org for all users. Reuse 'Demo Org' if it exists,
+    otherwise create it once and reuse thereafter.
+    """
+    org = (
         db.query(OrganizationORM)
-        .filter(OrganizationORM.owner_user_id == user.id)
+        .filter(OrganizationORM.name == "Demo Org")
         .first()
     )
-    if existing:
-        return existing
+    if org:
+        return org
+
+    org = db.query(OrganizationORM).order_by(OrganizationORM.created_at.asc()).first()
+    if org:
+        return org
+
     org = OrganizationORM(
         id=str(uuid.uuid4()),
-        name=f"{user.name}'s Org",
+        name="Demo Org",
         owner_user_id=user.id,
         created_at=datetime.utcnow(),
     )
@@ -132,30 +209,50 @@ def get_or_create_org_for_user(db: Session, user: UserORM) -> OrganizationORM:
     return org
 
 
-# ============================================================
-# SOFT ROOM ACCESS VALIDATION (Fix #1)
-# ============================================================
-
-def ensure_room_access(db: Session, user: UserORM, room: RoomORM) -> None:
+def ensure_room_access(db: Session, user: UserORM, room: RoomORM, expected_label: str | None = None) -> RoomORM:
     """
-    Required:
-    - Enforce org_id match strictly
-    - Only warn about name mismatches (never block)
+    Make sure the room is attached to the same org as the current user.
+
+    - If the room has no org_id, attach it to the user's org.
+    - If the room org_id mismatches, reassign it (soft fix) and log a warning.
+    - Optionally warn if the room name does not match the expected label,
+      but NEVER block on name mismatch.
     """
-    user_org = get_or_create_org_for_user(db, user)
+    if room is None:
+        raise HTTPException(status_code=404, detail="Room not found")
 
-    if room.org_id != user_org.id:
-        raise HTTPException(403, "Room belongs to another organization")
+    org = get_or_create_org_for_user(db, user)
 
-    # soft warning: team role mismatches, but never block
-    # (keeps compatibility with historical rooms)
-    # No exception here → only soft logging
-    return
+    if room.org_id is None:
+        room.org_id = org.id
+        db.add(room)
+        db.commit()
+        logger.info("Attached legacy room %s to org %s", room.id, org.id)
+    elif room.org_id != org.id:
+        logger.warning(
+            "Room %s org mismatch (room.org_id=%s, user_org=%s). Reassigning.",
+            room.id,
+            room.org_id,
+            org.id,
+        )
+        room.org_id = org.id
+        db.add(room)
+        db.commit()
 
+    # Soft name check only
+    if expected_label:
+        canonical = f"{expected_label.title()} Room"
+        if room.name.strip() != canonical:
+            logger.warning(
+                "Room %s name mismatch for label %s (room.name=%r, expected=%r)",
+                room.id,
+                expected_label,
+                room.name,
+                canonical,
+            )
 
-# ============================================================
-# Schemas
-# ============================================================
+    return room
+
 
 class AuthLoginRequest(BaseModel):
     email: str
@@ -257,6 +354,8 @@ class NotificationCreate(BaseModel):
     source_message_id: Optional[str] = None
     priority: Optional[str] = None
     tags: List[str] = []
+    type: Optional[str] = "task"
+    task_id: Optional[str] = None
 
 
 class NotificationOut(BaseModel):
@@ -265,8 +364,32 @@ class NotificationOut(BaseModel):
     type: str
     title: str
     message: str
+    task_id: Optional[str] = None
     created_at: datetime
     is_read: bool
+
+    class Config:
+        from_attributes = True
+
+class RoleUpdate(BaseModel):
+    role: str
+
+class TaskIn(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    assignee_id: str
+
+class TaskUpdate(BaseModel):
+    status: str
+
+class TaskOut(BaseModel):
+    id: str
+    title: str
+    description: str
+    assignee_id: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
 
     class Config:
         from_attributes = True
@@ -321,12 +444,12 @@ def register(payload: CreateUserRequest, response: Response, db: Session = Depen
         id=str(uuid.uuid4()),
         email=payload.email,
         name=payload.name,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     cred = UserCredentialORM(
         user_id=user.id,
         password_hash=hash_password(payload.password),
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(user)
     db.add(cred)
@@ -339,7 +462,8 @@ def register(payload: CreateUserRequest, response: Response, db: Session = Depen
         token,
         httponly=True,
         secure=False,
-        samesite="none",
+        samesite="lax",
+        path="/",
     )
 
     return user
@@ -362,9 +486,17 @@ def login(payload: AuthLoginRequest, response: Response, db: Session = Depends(g
         token,
         httponly=True,
         secure=False,
-        samesite="none",
+        samesite="lax",
+        path="/",
     )
     return response
+
+@app.post("/auth/logout")
+def logout(response: Response):
+    # Just clear the cookie; frontend will reload
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("access_token", path="/")
+    return resp
 
 
 @app.get("/me", response_model=UserOut)
@@ -382,7 +514,7 @@ def create_room(payload: CreateRoomRequest, request: Request, db: Session = Depe
         id=str(uuid.uuid4()),
         name=payload.room_name,
         org_id=org.id,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(room)
     db.commit()
@@ -394,17 +526,12 @@ def create_room(payload: CreateRoomRequest, request: Request, db: Session = Depe
 
 @app.get("/rooms/{room_id}", response_model=RoomResponse)
 def get_room(room_id: str, request: Request, db: Session = Depends(get_db)):
-    user = require_user(request, db)
+    user = require_current_user(request, db)
     room = db.get(RoomORM, room_id)
-    if not room:
-        raise HTTPException(404, "Room not found")
-    ensure_room_access(db, user, room)
+    room = ensure_room_access(db, user, room)
     return room_to_response(db, room)
 
 
-# ============================================================
-# TEAM ROOM ROUTE (Fix #2)
-# ============================================================
 
 CANONICAL_ROOMS = {
     "engineering": "Engineering Room",
@@ -422,12 +549,14 @@ def get_or_create_team_room(team_label: str, request: Request, db: Session = Dep
     user = require_user(request, db)
     org = get_or_create_org_for_user(db, user)
 
-    key = team_label.lower().strip()
-    room_name = CANONICAL_ROOMS.get(key, f"{team_label.title()} Room")
+    # Normalize to role-based room if available
+    label = (team_label or "").strip() or (user.role or "Team")
+    key = label.lower()
+    room_name = CANONICAL_ROOMS.get(key, f"{label.title()} Room")
 
     room = (
         db.query(RoomORM)
-        .filter(RoomORM.org_id == org.id, RoomORM.name == room_name)
+        .filter(RoomORM.org_id == org.id, func.lower(RoomORM.name) == func.lower(room_name))
         .first()
     )
     if not room:
@@ -435,7 +564,7 @@ def get_or_create_team_room(team_label: str, request: Request, db: Session = Dep
             id=str(uuid.uuid4()),
             name=room_name,
             org_id=org.id,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         db.add(room)
         db.commit()
@@ -490,7 +619,7 @@ def publish_status(room_id: str, step: str, meta: Optional[Dict] = None):
         "room_id": room_id,
         "step": step,
         "meta": meta or {},
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now(timezone.utc).isoformat(),
     })
 
 
@@ -500,7 +629,7 @@ def publish_error(room_id: str, message: str, meta: Optional[Dict] = None):
         "room_id": room_id,
         "message": message,
         "meta": meta or {},
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now(timezone.utc).isoformat(),
     })
 
 @app.get("/users/{user_id}/inbox", response_model=List[InboxTaskOut])
@@ -537,7 +666,7 @@ def add_inbox(user_id: str, payload: InboxCreateRequest, request: Request, db: S
         priority=payload.priority,
         tags=payload.tags,
         status="open",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(task)
     db.commit()
@@ -588,16 +717,151 @@ def create_notification(user_id: str, payload: NotificationCreate, request: Requ
     notif = NotificationORM(
         id=str(uuid.uuid4()),
         user_id=user_id,
-        type="task",
+        type=payload.type or "task",
         title=payload.title,
         message=payload.message or payload.title,
-        created_at=datetime.utcnow(),
+        task_id=payload.task_id,
+        created_at=datetime.now(timezone.utc),
         is_read=False,
     )
     db.add(notif)
     db.commit()
     db.refresh(notif)
     return notif
+
+# -----------------------------
+# GitHub IDE Mock Endpoints
+# -----------------------------
+@app.get("/api/github/status")
+def github_status():
+    return {
+        "connected": False,
+        "repo_name": None,
+        "repo_owner": None,
+        "repo_url": None,
+    }
+
+@app.get("/api/github/repo/files")
+def github_list_files(path: str = "", request: Request = None):
+    require_user(request, SessionLocal())
+    path = path.strip()
+    files = []
+    if not path:
+        files = GITHUB_MOCK_FILES
+    else:
+        files = [f for f in GITHUB_MOCK_FILES if f["path"].startswith(path)]
+    return {"files": files}
+
+@app.get("/api/github/repo/file")
+def github_get_file(path: str, request: Request = None):
+    require_user(request, SessionLocal())
+    content = GITHUB_MOCK_CONTENT.get(path, f"# {path}\n\nMock file. Connect GitHub for real content.\n")
+    return {"path": path, "content": content, "sha": None}
+
+# -----------------------------
+# Team / Tasks management
+# -----------------------------
+@app.get("/team")
+def get_team(request: Request, db: Session = Depends(get_db)):
+    require_user(request, db)
+    users = db.query(UserORM).all()
+    members = []
+    for u in users:
+        members.append({
+            "id": u.id,
+            "name": u.name,
+            "roles": [u.role] if u.role else [],
+            "status": "active",
+        })
+    return {"members": members}
+
+@app.patch("/users/{user_id}/role", response_model=UserOut)
+def update_user_role(user_id: str, payload: RoleUpdate, request: Request, db: Session = Depends(get_db)):
+    require_user(request, db)
+    user = db.get(UserORM, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if ROLE_OPTIONS and payload.role not in ROLE_OPTIONS:
+        raise HTTPException(400, f"Role must be one of: {', '.join(ROLE_OPTIONS)}")
+    user.role = payload.role
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+@app.get("/tasks", response_model=List[TaskOut])
+def list_tasks(request: Request, db: Session = Depends(get_db)):
+    require_user(request, db)
+    tasks = db.query(TaskORM).order_by(TaskORM.created_at.desc()).all()
+    return tasks
+
+@app.post("/tasks", response_model=TaskOut)
+def create_task(payload: TaskIn, request: Request, db: Session = Depends(get_db)):
+    me = require_user(request, db)
+    task = TaskORM(
+        id=str(uuid.uuid4()),
+        title=payload.title,
+        description=payload.description or "",
+        assignee_id=payload.assignee_id,
+        status="new",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    # best effort notify assignee
+    notif = NotificationORM(
+        id=str(uuid.uuid4()),
+        user_id=payload.assignee_id,
+        type="task",
+        title=f"New task from {me.name}",
+        message=payload.title,
+        task_id=task.id,
+        created_at=datetime.now(timezone.utc),
+        is_read=False,
+    )
+    db.add(notif)
+    db.commit()
+    return task
+
+@app.patch("/tasks/{task_id}", response_model=TaskOut)
+def update_task(task_id: str, payload: TaskUpdate, request: Request, db: Session = Depends(get_db)):
+    require_user(request, db)
+    task = db.get(TaskORM, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    task.status = payload.status
+    task.updated_at = datetime.now(timezone.utc)
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
+
+def get_current_user(request: Request, db: Session) -> Optional[UserORM]:
+    token = request.cookies.get("access_token")
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        if not user_id:
+            return None
+    except JWTError:
+        return None
+    return db.get(UserORM, user_id)
+
+
+def require_current_user(request: Request, db: Session) -> UserORM:
+    """
+    Fetch the currently authenticated user from the JWT cookie.
+    Raise 401 if not authenticated.
+    """
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
+
 
 # ============================================================
 # MEMORY HELPERS
@@ -610,7 +874,7 @@ def append_memory(db: Session, room: RoomORM, agent_id: str, content: str, impor
         room_id=room.id,
         content=content,
         importance_score=importance,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(mem)
     return mem
@@ -641,10 +905,59 @@ def extract_explicit_summary_request(text: str) -> Optional[str]:
         return text[lower.index(marker) + len(marker):].strip()
     return None
 
-def build_ai_prompt(db: Session, room: RoomORM, user: UserORM, content: str, mode: str):
+def build_ai_prompt(
+    db: Session,
+    room: RoomORM,
+    user: UserORM,
+    content: str,
+    mode: str,
+):
+    """
+    Build a system + user prompt that:
+    - Only goes into "draft a message to X" mode when the user actually
+      asks to send/notify/tell someone.
+    - Otherwise just answers the question normally.
+    - Always talks to the user as "you" / "I", not using their name.
+    """
     memories = list_recent_memories(db, room.id, limit=8)
     mem_text = "\n".join(f"- {m.content}" for m in memories)
 
+    # Figure out teammate names in this org (excluding current user)
+    teammate_names: list[str] = []
+    if room.org_id:
+        teammates = (
+            db.query(UserORM)
+            .filter(UserORM.org_id == room.org_id)
+            .all()
+        )
+        teammate_names = [
+            (u.name or "").strip()
+            for u in teammates
+            if u.id != user.id and (u.name or "").strip()
+        ]
+
+    text_lower = (content or "").lower()
+    outreach_verbs = [
+        "tell ",
+        "message ",
+        "notify ",
+        "ping ",
+        "remind ",
+        "email ",
+        "dm ",
+        "slack ",
+        "text ",
+        "send a message",
+        "send this to",
+        "let them know",
+    ]
+    has_verb = any(v in text_lower for v in outreach_verbs)
+    has_teammate_name = any(
+        name and name.lower() in text_lower for name in teammate_names
+    )
+    is_outreach = has_verb and has_teammate_name
+
+    # Base system prompt
     system = f"""
 You are the workspace assistant inside the room "{room.name}".
 
@@ -655,15 +968,45 @@ Core rules:
 - Never update summaries unless the user explicitly says: "update summary: ...".
 - Answer concisely and stay on task.
 - Do not hallucinate tasks, inbox items, or teammates that don't exist.
+- The user's name is "{user.name}". When you talk to them, refer to them as "you".
+  If you write a message on their behalf, speak in first person ("I", "we") and
+  never say their name in third person.
 
-When the user asks you to "send a message to X", or "tell X that ...":
+""".rstrip()
+
+    if is_outreach:
+        # Only in true teammate-messaging scenarios do we use the helper pattern.
+        system += """
+
+Current request type: TEAM OUTREACH.
+
+The user is asking you to help send a message to another teammate.
+
+When the user asks you to "send a message to X", "tell X that ...", or similar:
 - Assume they want help with the wording.
-- Respond with a short, natural message they could send, e.g.
-  "Here’s a message you could send to Alice about fixing the UI: '...'"
-- Do NOT call it a "draft".
-- It's okay to ask once for confirmation like:
-  "Do you want to use that message as-is?"
-- Do not repeat long disclaimers about what you can or cannot do.
+- Respond with ONE short, natural message they could send, written in the user's voice.
+  For example:
+    "Hi Alice, could you take a look at the UI and finish the remaining tasks today?"
+- Do NOT say "Here is a draft" or "I won't send this automatically".
+- You may ask ONCE:
+    "Do you want to use that message as-is?"
+- Do not ask for confirmation more than once and do not loop.
+"""
+    else:
+        # For normal questions, forbid the draft-message pattern entirely.
+        system += """
+
+Current request type: NORMAL QUESTION.
+
+The user is NOT asking you to send or draft a message to a teammate.
+For this request:
+- Just answer the question directly.
+- Do NOT suggest or draft messages to teammates.
+- Do NOT use phrases like "Here’s a message you could send to X".
+- Do NOT ask whether they want to send anything.
+"""
+
+    system += f"""
 
 You may use these recent memory notes and project context:
 
@@ -674,9 +1017,10 @@ Recent Memory Notes:
 {mem_text or "(none)"}
 
 Mode: {mode}
-    """.strip()
+""".rstrip()
 
-    user_msg = f"{user.name} says:\n{content}"
+    # User message is just their raw content; no third-person name.
+    user_msg = content
 
     return system, user_msg
 
@@ -696,23 +1040,133 @@ def run_ai(client: OpenAI, system_prompt: str, user_text: str) -> str:
     return resp.choices[0].message.content
 
 
-# ============================================================
-# ASK ROUTE (Fix #5, #6, #11, #14)
-# ============================================================
+CONFIRM_PHRASES = [
+    "yes",
+    "yes please",
+    "yes, please",
+    "yeah",
+    "yep",
+    "sure",
+    "please send",
+    "send it",
+    "send it for me",
+    "go ahead and send",
+    "can you send it for me",
+]
+
+
+def maybe_send_approved_message(
+    db: Session,
+    room: RoomORM,
+    user: UserORM,
+    latest_text: str,
+) -> Optional[MessageORM]:
+    """
+    If the latest user message is a confirmation to send a previously
+    suggested draft (e.g., 'Yes please, send it'), convert that draft
+    into a NotificationORM and add a deterministic assistant reply.
+
+    Returns the assistant MessageORM if we handled it, otherwise None.
+    """
+    normalized = latest_text.strip().lower()
+    if not any(p in normalized for p in CONFIRM_PHRASES):
+        return None
+
+    # Look at the most recent assistant message in this room
+    last_assistant = (
+        db.query(MessageORM)
+        .filter(MessageORM.room_id == room.id, MessageORM.role == "assistant")
+        .order_by(MessageORM.created_at.desc())
+        .first()
+    )
+    if not last_assistant or not last_assistant.content:
+        return None
+
+    content = last_assistant.content
+
+    # Pattern: “Here’s a message you could send to Angie: "Hi Angie, ..." …”
+    m = re.search(
+        r"message you could send to\s+([A-Za-z][A-Za-z0-9_\- ]*)\s*:\s*\"(.+?)\"",
+        content,
+        flags=re.DOTALL,
+    )
+    if not m:
+        return None
+
+    target_name = m.group(1).strip()
+    message_text = m.group(2).strip()
+
+    # Find recipient user in same org
+    recipient = (
+        db.query(UserORM)
+        .filter(
+            UserORM.org_id == room.org_id,
+            func.lower(UserORM.name) == target_name.lower(),
+        )
+        .first()
+    )
+
+    # If we can't find them, just tell the user and bail
+    if not recipient:
+        bot_msg = MessageORM(
+            id=str(uuid.uuid4()),
+            room_id=room.id,
+            sender_id="agent:coordinator",
+            sender_name="Coordinator",
+            role="assistant",
+            content=(
+                f"I couldn't find a teammate named {target_name} in your workspace, "
+                f"so I couldn’t send it automatically. Here’s the message again for you "
+                f"to copy and send manually:\n\n{message_text}"
+            ),
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(bot_msg)
+        db.commit()
+        return bot_msg
+
+    # Create notification with EXACT approved content
+    notif = NotificationORM(
+        id=str(uuid.uuid4()),
+        user_id=recipient.id,
+        type="message",
+        title=f"Message from {user.name}",
+        message=message_text,
+        created_at=datetime.now(timezone.utc),
+        is_read=False,
+    )
+    db.add(notif)
+
+    # Deterministic assistant reply – no LLM call
+    bot_msg = MessageORM(
+        id=str(uuid.uuid4()),
+        room_id=room.id,
+        sender_id="agent:coordinator",
+        sender_name="Coordinator",
+        role="assistant",
+        content=f'Okay, I sent this message to {recipient.name}:\n\n"{message_text}"',
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(bot_msg)
+
+    db.commit()
+    publish_status(room.id, "notification_sent", {"recipient": recipient.name})
+    return bot_msg
+
+
+
 
 @app.post("/rooms/{room_id}/ask", response_model=RoomResponse)
 def ask(room_id: str, payload: AskModeRequest, request: Request, db: Session = Depends(get_db)):
-    """
-    Clean, non-spammy, stable version of the ask route.
-    """
-    user = require_user(request, db)
+    user = require_current_user(request, db)
+
     room = db.get(RoomORM, room_id)
-    if not room:
-        raise HTTPException(404, "Room not found")
+    room = ensure_room_access(db, user, room)
 
-    ensure_room_access(db, user, room)
+    publish_status(room_id, "ask_received", {"mode": payload.mode, "user": payload.user_name})
+    logger.info("Ask received room_id=%s user_id=%s mode=%s", room_id, payload.user_id, payload.mode)
 
-    # Save human message
+    # Save user message
     user_msg = MessageORM(
         id=str(uuid.uuid4()),
         room_id=room.id,
@@ -720,64 +1174,73 @@ def ask(room_id: str, payload: AskModeRequest, request: Request, db: Session = D
         sender_name=user.name,
         role="user",
         content=payload.content,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(user_msg)
     db.commit()
 
-    publish_status(room_id, "received", {"mode": payload.mode})
+    publish_status(room.id, "ask_received", {"mode": payload.mode})
 
-    # Build system & user prompts
-    system_prompt, user_prompt = build_ai_prompt(
-        db=db,
-        room=room,
-        user=user,
-        content=payload.content,
-        mode=payload.mode
-    )
-
-    # Decide agent used for reply
-    agent_id = payload.target_agent or "coordinator"
-    client = CLIENTS.get(agent_id, CLIENTS["coordinator"])
-
-    # AI Call
+    # 🔥 First: try to handle “Yes please send it” confirmations
     try:
-        publish_status(room_id, "thinking")
-        answer = run_ai(client, system_prompt, user_prompt)
-        publish_status(room_id, "reply_ready", {"agent": agent_id})
-    except Exception as exc:
-        publish_error(room_id, f"AI error: {exc}")
-        raise HTTPException(502, "AI provider error")
+        handled = maybe_send_approved_message(db, room, user, payload.content)
+    except Exception as e:
+        # Don’t crash the route if the helper misbehaves; just log and fall back to AI.
+        print("Error in maybe_send_approved_message:", e)
+        handled = None
 
-    # Save assistant message
+    if handled:
+        # We already created an assistant message + notification, no LLM call needed
+        return room_to_response(db, room)
+
+    # ⬇️ AI call ⬇️
+    client = get_default_client()
+    # Use lightweight system prompt builder (fallback)
+    system_prompt = build_system_prompt_for_room(db, room, user, mode=payload.mode)
+    user_prompt = payload.content
+
+    try:
+        publish_status(room.id, "routing_agent", {"agent": "Coordinator"})
+        completion = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        answer = completion.choices[0].message.content or ""
+    except Exception as e:
+        print("AI call failed:", e)
+        bot_msg = MessageORM(
+            id=str(uuid.uuid4()),
+            room_id=room.id,
+            sender_id="agent:coordinator",
+            sender_name="Coordinator",
+            role="assistant",
+            content="Something went wrong. Try again.",
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(bot_msg)
+        db.commit()
+        publish_error(room.id, "ai_error", {"error": str(e)})
+        return room_to_response(db, room)
+
+    # Save assistant reply
     bot_msg = MessageORM(
         id=str(uuid.uuid4()),
         room_id=room.id,
-        sender_id=f"agent:{agent_id}",
-        sender_name=agent_id.title(),
+        sender_id="agent:coordinator",
+        sender_name="Coordinator",
         role="assistant",
         content=answer,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(bot_msg)
-
-    # Explicit summary updates
-    summary_update = extract_explicit_summary_request(payload.content)
-    if summary_update:
-        room.project_summary = summary_update
-        append_memory(db, room, agent_id="coordinator", content=f"Summary updated: {summary_update}", importance=0.4)
-
-    # No auto-updates occur — this matches Fix #14 exactly.
-
     db.commit()
 
-    # Return updated room
+    publish_status(room.id, "synthesis_complete", {})
+
     return room_to_response(db, room)
-
-
-# ============================================================
-# MEMORY ENDPOINTS
-# ============================================================
 
 @app.get("/rooms/{room_id}/memory")
 def get_memory(room_id: str, request: Request, db: Session = Depends(get_db)):
@@ -844,4 +1307,3 @@ Memory Context:
     db.commit()
 
     return {"answer": answer}
-

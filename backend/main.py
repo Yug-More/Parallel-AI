@@ -62,6 +62,20 @@ SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 1440
 
+# Mock GitHub repo data (until real integration is wired)
+GITHUB_MOCK_FILES = [
+    {"path": "README.md", "type": "file"},
+    {"path": "docs/plan.md", "type": "file"},
+    {"path": "src/app.py", "type": "file"},
+    {"path": "src/api/routes.py", "type": "file"},
+]
+GITHUB_MOCK_CONTENT = {
+    "README.md": "# Mock Repo\n\nConnect GitHub to see real content.\n",
+    "docs/plan.md": "# Plan\n\n- [ ] Hook up GitHub OAuth\n- [ ] List files from API\n- [ ] Edit and commit\n",
+    "src/app.py": "print('hello from mock repo')\n",
+    "src/api/routes.py": "# routes placeholder\n",
+}
+
 # ============================================================
 # Utility
 # ============================================================
@@ -83,18 +97,113 @@ def get_default_client():
         return client
     raise HTTPException(500, "No OpenAI client configured")
 
+def build_system_context(db: Session, room: RoomORM) -> str:
+    """
+    Lightweight shared room context used by all per-user reps.
 
-def build_system_prompt_for_room(db: Session, room, user, mode: str = "team") -> str:
+    - Describes the room + org at a high level
+    - Includes project + memory summaries
+    - Includes a short recent message history (speaker-name tagged)
     """
-    Fallback system prompt builder.
-    """
-    role = getattr(user, "role", None) or "Member"
-    return (
-        f"Room: {getattr(room, 'name', '')}\\n"
-        f"User: {getattr(user, 'name', 'User')} (role: {role})\\n"
-        f"Mode: {mode}\\n"
-        "Be concise. Answer only the user's question. Do not add next steps unless asked."
+    # Recent memory notes for this room
+    try:
+        memories = list_recent_memories(db, room.id, limit=8)
+    except Exception:
+        memories = []
+
+    mem_text = "\n".join(f"- {m.content}" for m in memories) or "(none)"
+
+    # Last ~10 messages in this room for conversation context
+    recent_msgs = (
+        db.query(MessageORM)
+        .filter(MessageORM.room_id == room.id)
+        .order_by(MessageORM.created_at.desc())
+        .limit(10)
+        .all()
     )
+    # Reverse so oldest → newest
+    recent_msgs = list(reversed(recent_msgs))
+
+    history_lines = []
+    for m in recent_msgs:
+        sender = m.sender_name or m.sender_id or "unknown"
+        # keep history compact
+        text = (m.content or "").strip()
+        if len(text) > 300:
+            text = text[:297] + "..."
+        history_lines.append(f"{sender}: {text}")
+
+    history_text = "\n".join(history_lines) or "(no recent messages)"
+
+    return f"""
+You are an AI assistant working inside a shared workspace room.
+
+Room:
+- id: {room.id}
+- name: {room.name}
+
+This room belongs to a single organization where multiple human teammates
+each have their own dedicated AI representative. Different humans may share
+this room, but you always act on behalf of the one human you represent
+(the caller will be specified in a separate block).
+
+Project summary for this room:
+{room.project_summary or "(none set yet)"}
+
+Long-term memory summary for this room:
+{room.memory_summary or "(none yet)"}
+
+Recent memory notes:
+{mem_text}
+
+Recent conversation in this room (oldest to newest):
+{history_text}
+""".strip()
+
+
+def build_system_prompt_for_room(
+    db: Session,
+    room: RoomORM,
+    user: UserORM,
+    mode: str = "team",
+) -> str:
+    """
+    Build a system prompt for THIS user’s AI representative.
+    The room is shared, but this agent only represents `user`.
+    """
+    base_ctx = build_system_context(db, room)
+
+    rep_block = f"""
+You are the dedicated AI representative for this human teammate:
+
+- name: {user.name or "Unknown"}
+- id: {user.id}
+
+You speak AS their assistant.
+When you say "you", you are talking ONLY to this human.
+Do not treat other teammates' messages as if they were from this user.
+"""
+
+    team_block = """
+The organization may contain many teammates using their own AI reps.
+
+- You may see references to other people (e.g. “Angie”, “z”).
+- Never confuse the current human with their teammates.
+- Refer to teammates as "your teammate Angie", "your teammate z", etc.
+- If the human asks about a teammate, answer from the perspective of THIS human.
+"""
+
+    mode_block = f"Current interaction mode: {mode or 'team'}."
+
+    return f"""{base_ctx}
+
+{rep_block}
+
+{team_block}
+
+{mode_block}
+""".strip()
+
 
 def create_access_token(data: dict, expires_delta: timedelta = None):
     to_encode = data.copy()
@@ -137,51 +246,29 @@ def require_user(request: Request, db: Session) -> UserORM:
 
 def get_or_create_org_for_user(db: Session, user: UserORM) -> OrganizationORM:
     """
-    For now we treat the app as single-tenant:
-    - If a 'Demo Org' (or any org) exists, everyone joins that org.
-    - If no org exists yet, create one for the current user.
-
-    This guarantees all users share the same org and avoids org-mismatch
-    403s from legacy per-user org rows.
+    Force a single shared org for all users. Reuse 'Demo Org' if it exists,
+    otherwise create it once and reuse thereafter.
     """
-    # Prefer a named demo org if it exists
     org = (
         db.query(OrganizationORM)
         .filter(OrganizationORM.name == "Demo Org")
         .first()
     )
     if org:
-        # Optionally sync user.org_id to this org if the column exists
-        if getattr(user, "org_id", None) != org.id:
-            setattr(user, "org_id", org.id)
-            db.add(user)
-            db.commit()
         return org
 
-    # Otherwise just grab the first org in the table, if any
     org = db.query(OrganizationORM).order_by(OrganizationORM.created_at.asc()).first()
     if org:
-        if getattr(user, "org_id", None) != org.id:
-            setattr(user, "org_id", org.id)
-            db.add(user)
-            db.commit()
         return org
 
-    # No orgs yet — create the first one
     org = OrganizationORM(
         id=str(uuid.uuid4()),
-        name=f"{user.name}'s Org" if user.name else "Workspace",
+        name="Demo Org",
         owner_user_id=user.id,
         created_at=datetime.utcnow(),
     )
     db.add(org)
     db.commit()
-
-    if hasattr(user, "org_id"):
-        user.org_id = org.id
-        db.add(user)
-        db.commit()
-
     return org
 
 
@@ -704,6 +791,35 @@ def create_notification(user_id: str, payload: NotificationCreate, request: Requ
     db.commit()
     db.refresh(notif)
     return notif
+
+# -----------------------------
+# GitHub IDE Mock Endpoints
+# -----------------------------
+@app.get("/api/github/status")
+def github_status():
+    return {
+        "connected": False,
+        "repo_name": None,
+        "repo_owner": None,
+        "repo_url": None,
+    }
+
+@app.get("/api/github/repo/files")
+def github_list_files(path: str = "", request: Request = None):
+    require_user(request, SessionLocal())
+    path = path.strip()
+    files = []
+    if not path:
+        files = GITHUB_MOCK_FILES
+    else:
+        files = [f for f in GITHUB_MOCK_FILES if f["path"].startswith(path)]
+    return {"files": files}
+
+@app.get("/api/github/repo/file")
+def github_get_file(path: str, request: Request = None):
+    require_user(request, SessionLocal())
+    content = GITHUB_MOCK_CONTENT.get(path, f"# {path}\n\nMock file. Connect GitHub for real content.\n")
+    return {"path": path, "content": content, "sha": None}
 
 # -----------------------------
 # Team / Tasks management
