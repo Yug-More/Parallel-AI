@@ -2,9 +2,8 @@ import ThemeToggle from "./ThemeToggle";
 import logo from "../assets/parallel-logo.svg";
 import "./Sidebar.css";
 
-export default function Sidebar({ active = "Chat", onSelect = () => {} }) {
+export default function Sidebar({ active = "Team", onSelect = () => {}, onToggle = () => {} }) {
   const navItems = [
-    { label: "Chat" },
     { label: "Team" },
     { label: "Inbox" },
     { label: "IDE" },
@@ -61,6 +60,7 @@ export default function Sidebar({ active = "Chat", onSelect = () => {} }) {
 
       <div className="sidebar-bottom">
         <ThemeToggle />
+        <button className="sidebar-btn ghost collapse" onClick={onToggle}>Collapse</button>
       </div>
     </div>
   );

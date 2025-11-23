@@ -49,20 +49,26 @@ function IdeView() {
 }
 
 export default function Dashboard() {
-  const [activeTool, setActiveTool] = useState("Chat");
+  const [activeTool, setActiveTool] = useState("Team");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  const renderCenter = () => {
+  const renderRight = () => {
     if (activeTool === "Team") return <TeamView />;
     if (activeTool === "Inbox") return <InboxView />;
     if (activeTool === "IDE") return <IdeView />;
-    return <ChatPanel />;
+    return <SummaryPanel />;
   };
 
   return (
     <div className="dashboard-container">
-      <Sidebar active={activeTool} onSelect={setActiveTool} />
-      {renderCenter()}
-      <SummaryPanel />
+      {sidebarOpen && <Sidebar active={activeTool} onSelect={setActiveTool} onToggle={() => setSidebarOpen(false)} />}
+      {!sidebarOpen && (
+        <button className="sidebar-toggle" onClick={() => setSidebarOpen(true)}>
+          ☰
+        </button>
+      )}
+      <ChatPanel />
+      {renderRight()}
     </div>
   );
 }
