@@ -1,0 +1,73 @@
+Parallel-AI — Manager/Tasks Feature Integration Summary
+Generated: 2025-11-23T15:06:16Z
+
+1) What we added (backend)
+- New DB models in models.py:
+  • Task(id, title, description, assignee_id, status, created_at, updated_at)
+  • Notification(id, user_id, type, title, message, task_id, created_at, is_read)
+- New API schemas in main.py: TaskIn, TaskOut, NotificationOut.
+- New API routes in main.py:
+  • GET  /team                       -> returns all users as members (id, name, roles, status)
+  • GET  /tasks                      -> list all tasks (newest first)
+  • POST /tasks                      -> create a task (title, description, assignee_id)
+  • PATCH /tasks/{task_id}          -> update status (e.g., "in_progress", "complete")
+  • GET  /users/{user_id}/notifications -> list notifications
+  • POST /users/{user_id}/notifications -> create a notification (used as best‑effort alert)
+- The POST /tasks also creates a Notification for the assignee.
+- Tasks persist in SQL via SQLAlchemy; we now support Postgres in addition to SQLite.
+
+2) Database & runtime
+- database.py reads DATABASE_URL (default: sqlite:///./parallel.db). For Postgres it accepts:
+  postgresql+psycopg2://parallel:parallel@db:5432/parallel
+- docker-compose.yml now includes:
+  • db (postgres:16) with volume 'db-data'
+  • backend service (uvicorn --reload) and DATABASE_URL pointing to Postgres
+- requirements.txt now includes psycopg2-binary.
+- On startup, tables are auto-created (Base.metadata.create_all). Demo user/room seeded once.
+
+3) What we added (frontend)
+- Manager.jsx (full screen Manager view):
+  • Left panel: Team list with placeholder permission checkboxes (Frontend / Backend).
+    - These checkboxes are UI-only for now (not persisted).
+  • Right panel: Create Task form + "All Tasks" list.
+    - Create task posts to /tasks and immediately shows in the list.
+    - Actions: In Progress, Complete.
+    - "Report" button was removed.
+    - When you click Complete, the task disappears right away (still stored in DB as status=complete).
+  • Uses a shared TaskContext so tasks remain visible when you switch tabs (we call listTasks() on mount and update local state on changes).
+- Manager.css refinements:
+  • Layout uses CSS grid with resizable columns: .manager-card and .manager-pane have 'resize: horizontal' and sensible min/max widths.
+  • .manager-wrap height: calc(100vh - 40px); overflow: hidden to avoid nested scrollbars.
+  • Reduced gaps; made right panel wider by default; keeps “All Tasks” from getting squished.
+
+4) Dashboard integration
+- Dashboard.jsx: when the "Manager" tab is active, we hide ChatPanel/Right panel and render <Manager /> full width (gridColumn: span 2). For other tabs, the layout remains the same.
+- AppLayout.jsx unchanged except for normal navigation to <Dashboard />.
+- Ensure TaskContext.Provider wraps the app (e.g., in main.jsx or App.jsx) so Manager has shared task state across tab switches.
+
+5) How to run
+- With Docker:
+  1) docker compose up --build
+  2) Visit http://localhost:5173 (frontend) and http://localhost:8000/docs (backend docs).
+- Local without Docker:
+  1) Set DATABASE_URL to your Postgres or keep default SQLite.
+  2) pip install -r requirements.txt
+  3) uvicorn main:app --reload (from backend folder)
+  4) npm run dev (from frontend folder)
+- Hard refresh browser if styles don’t apply: Ctrl+Shift+R (Windows/Linux) or Cmd+Shift+R (macOS).
+
+6) Endpoints quick test (curl)
+- Create task:
+  curl -X POST http://localhost:8000/tasks -H 'Content-Type: application/json' -d '{"title":"Test","description":"Demo","assignee_id":"<USER_ID>"}'
+- List tasks:
+  curl http://localhost:8000/tasks
+- Mark complete:
+  curl -X PATCH http://localhost:8000/tasks/<TASK_ID> -H 'Content-Type: application/json' -d '{"status":"complete"}'
+
+7) Known limits / next steps
+- Permissions UI is placeholder only (no backend persistence yet).
+- /tasks returns all tasks; later we can add filtering (by assignee, status) or user-scoped views.
+- Notifications are best‑effort, not a guaranteed delivery system.
+- Consider auth/permissions on task routes if needed for multi-user environments.
+
+That’s it — your tasks now persist in the database, the Manager view has a permissions UI, the All Tasks panel is no longer squished, and completing a task hides it from the list immediately.

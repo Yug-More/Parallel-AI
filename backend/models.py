@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, String, Text, JSON
+from sqlalchemy import Column, DateTime, Float, ForeignKey, String, Text, JSON, Integer, Boolean
 from sqlalchemy.orm import relationship
 
 from database import Base
@@ -12,6 +12,7 @@ class User(Base):
     id = Column(String, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
     name = Column(String, nullable=False)
+    role = Column(String, nullable=True)
     preferences = Column(JSON, default=dict)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -71,6 +72,8 @@ class Room(Base):
     name = Column(String, nullable=False)
     project_summary = Column(Text, default="")
     memory_summary = Column(Text, default="")
+    summary_version = Column(Integer, default=1)
+    summary_updated_at = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     org = relationship("Organization", back_populates="rooms")
@@ -119,15 +122,16 @@ class MemoryRecord(Base):
     agent = relationship("AgentProfile", back_populates="memories")
     room = relationship("Room", back_populates="memories")
 
+
 class Task(Base):
     __tablename__ = "tasks"
     id = Column(String, primary_key=True, index=True)
     title = Column(String, nullable=False)
     description = Column(Text, default="")
-    assignee_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)  # ✅ add index
-    status = Column(String, default="new")
+    assignee_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    status = Column(String, default="new", index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
     assignee = relationship("User")
 
@@ -135,13 +139,24 @@ class Task(Base):
 class Notification(Base):
     __tablename__ = "notifications"
     id = Column(String, primary_key=True, index=True)
-    user_id = Column(String, ForeignKey("users.id"), nullable=False)
-    type = Column(String, default="task_assigned")
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    type = Column(String, default="task")
     title = Column(String, nullable=False)
     message = Column(Text, default="")
     task_id = Column(String, ForeignKey("tasks.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    is_read = Column(String, default="false")
+    is_read = Column(Boolean, default=False)
 
     user = relationship("User")
     task = relationship("Task")
+
+
+class EventLog(Base):
+    __tablename__ = "event_logs"
+    id = Column(String, primary_key=True, index=True)
+    room_id = Column(String, ForeignKey("rooms.id"), nullable=False, index=True)
+    user_id = Column(String, nullable=True)
+    event_type = Column(String, nullable=False)
+    detail = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+

@@ -61,10 +61,8 @@ export default function Dashboard() {
   const [roomId, setRoomId] = useState(null);
   const [roomData, setRoomData] = useState(null);
   const [inbox, setInbox] = useState([]);
-  const [roomError, setRoomError] = useState("");
   const apiBase = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
-  // --- Fetch current user ---
   useEffect(() => {
     const fetchMe = async () => {
       try {
@@ -80,45 +78,8 @@ export default function Dashboard() {
     fetchMe();
   }, [apiBase]);
 
-  // --- Resolve canonical team room once user is known ---
   useEffect(() => {
-    if (!user.id || roomId) return;
-
-    const resolveRoom = async () => {
-      try {
-        // If you later add user.role, replace "team" with user.role
-        const teamLabel = "team";
-        const res = await fetch(`${apiBase}/rooms/team/${teamLabel}`, {
-          credentials: "include",
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          console.error("Failed to resolve team room", res.status, text);
-          setRoomError("Could not resolve team room.");
-          return;
-        }
-        const data = await res.json();
-        setRoomId(data.room_id);
-      } catch (err) {
-        console.error("Error resolving team room", err);
-        setRoomError("Could not resolve team room.");
-      }
-    };
-
-    resolveRoom();
-  }, [user.id, roomId, apiBase]);
-
-  // --- Activity / status log ---
-  useEffect(() => {
-    const label =
-      activeTool === "IDE"
-        ? "Development"
-        : activeTool === "Inbox"
-        ? "Inbox review"
-        : activeTool === "Team"
-        ? "Team activity"
-        : "In chat";
-
+    const label = activeTool === "IDE" ? "Development" : activeTool === "Inbox" ? "Inbox review" : activeTool === "Team" ? "Team activity" : "In chat";
     const entry = {
       id: `${Date.now()}`,
       state: label,
@@ -127,18 +88,16 @@ export default function Dashboard() {
       name: user.name || "You",
     };
     setActivityLog((prev) => [entry, ...prev].slice(0, 6));
-    setTeamStatuses([{ name: user.name || "You", role: label, state: "active" }]);
+    setTeamStatuses([
+      { name: user.name || "You", role: label, state: "active" },
+    ]);
   }, [activeTool, user.name]);
 
-  // --- Fetch room details (poll) ---
   useEffect(() => {
     if (!roomId) return;
-
     const fetchRoom = async () => {
       try {
-        const res = await fetch(`${apiBase}/rooms/${roomId}`, {
-          credentials: "include",
-        });
+        const res = await fetch(`${apiBase}/rooms/${roomId}`, { credentials: "include" });
         if (res.ok) {
           const data = await res.json();
           setRoomData(data);
@@ -152,14 +111,11 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, [roomId, apiBase]);
 
-  // --- Inbox polling ---
   useEffect(() => {
     if (!user.id) return;
     const fetchInbox = async () => {
       try {
-        const res = await fetch(`${apiBase}/users/${user.id}/inbox`, {
-          credentials: "include",
-        });
+        const res = await fetch(`${apiBase}/users/${user.id}/inbox`, { credentials: "include" });
         if (res.ok) {
           const data = await res.json();
           setInbox(data || []);
@@ -176,7 +132,7 @@ export default function Dashboard() {
   const handleLogout = async () => {
     try {
       await fetch(`${apiBase}/auth/logout`, { method: "POST", credentials: "include" });
-    } catch {
+    } catch (err) {
       // ignore
     } finally {
       window.location.reload();
@@ -184,61 +140,48 @@ export default function Dashboard() {
   };
 
   const renderRight = () => {
-    if (activeTool === "Manager") return <Manager currentUser={user} />;
-    if (activeTool === "Team")
-      return (
-        <>
-          <TeamView user={user} statuses={teamStatuses} />
-          <NotificationsPanel user={user} />
-        </>
-      );
+  if (activeTool === "Manager") return <Manager currentUser={user} />;
+    if (activeTool === "Team") return (
+      <>
+        <TeamView user={user} statuses={teamStatuses} />
+        <NotificationsPanel user={user} />
+      </>
+    );
     if (activeTool === "Inbox") return <InboxView inbox={inbox} />;
     if (activeTool === "IDE") return <IdeView />;
-    return (
-      <SummaryPanel
-        user={user}
-        activeTool={activeTool}
-        activityLog={activityLog}
-        roomData={roomData}
-      />
-    );
+    return <SummaryPanel user={user} activeTool={activeTool} activityLog={activityLog} roomData={roomData} />;
   };
 
-  const containerClass = sidebarOpen
-    ? "dashboard-container"
-    : "dashboard-container collapsed";
+  const containerClass = sidebarOpen ? "dashboard-container" : "dashboard-container collapsed";
 
   return (
-    <div className={containerClass}>
-      {sidebarOpen ? (
-        <Sidebar
-          active={activeTool}
-          onSelect={setActiveTool}
-          onToggle={() => setSidebarOpen(false)}
-          onLogout={handleLogout}
-        />
-      ) : (
-        <div className="sidebar-toggle-shell">
-          <button
-            className="sidebar-toggle"
-            onClick={() => setSidebarOpen(true)}
-            aria-label="Expand sidebar"
-          >
-            ‹›
-          </button>
-        </div>
-      )}
-
-      {activeTool === "Manager" ? (
-        <div style={{ gridColumn: "span 2", width: "100%" }}>
-          <Manager currentUser={user} />
-        </div>
-      ) : (
-        <>
-          <ChatPanel user={user} roomId={roomId} />
-          {renderRight()}
-        </>
-      )}
+   <div className={containerClass}>
+  {sidebarOpen ? (
+    <Sidebar
+      active={activeTool}
+      onSelect={setActiveTool}
+      onToggle={() => setSidebarOpen(false)}
+      onLogout={handleLogout}
+    />
+  ) : (
+    <div className="sidebar-toggle-shell">
+      <button className="sidebar-toggle" onClick={() => setSidebarOpen(true)} aria-label="Expand sidebar">
+        ‹›
+      </button>
     </div>
+  )}
+
+  {/* 👇 Hide Chat and Right Panel when Manager is active */}
+  {activeTool === "Manager" ? (
+    <div style={{ gridColumn: "span 2", width: "100%" }}>
+      <Manager currentUser={user} />
+    </div>
+  ) : (
+    <>
+      <ChatPanel user={user} onRoomReady={setRoomId} />
+      {renderRight()}
+    </>
+  )}
+</div>
   );
 }

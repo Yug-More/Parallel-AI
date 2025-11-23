@@ -2,47 +2,57 @@ import { useState, useMemo, useEffect } from "react";
 import "./ChatPanel.css";
 import ChatBubble from "./ChatBubble";
 
-export default function ChatPanel({
-  user = { id: "demo-user", name: "You" },
-  roomId,
-}) {
+export default function ChatPanel({ user = { id: "demo-user", name: "You" }, onRoomReady = () => {} }) {
   const [messages, setMessages] = useState([
-    { sender: "ai", text: `Hey ${user.name || "there"} — how can I help today?` },
+    { sender: "ai", text: `Hey ${user.name || "there"} — how can I help today?` }
   ]);
   const [input, setInput] = useState("");
   const [typing, setTyping] = useState(false);
   const [status, setStatus] = useState("");
+  const [roomId, setRoomId] = useState(null);
   const [roomError, setRoomError] = useState("");
 
   const apiBase = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
-  // 🔥 New: update greeting when the user changes
-  useEffect(() => {
-    setMessages([
-      {
-        sender: "ai",
-        text: `Hey ${user.name || "there"} — how can I help today?`,
-      },
-    ]);
-  }, [user.name]);
+  async function ensureRoom() {
+    if (roomId || roomError) return roomId;
+    try {
+      const res = await fetch(`${apiBase}/rooms`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ room_name: "Parallel Demo" }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        console.error("Room create failed", res.status, text);
+        throw new Error(`Room creation failed (${res.status})`);
+      }
+      const data = await res.json();
+      setRoomId(data.room_id);
+      onRoomReady(data.room_id);
+      return data.room_id;
+    } catch (err) {
+      const msg = err?.message || "Failed to create room";
+      setRoomError(msg);
+      setStatus(msg);
+      return null;
+    }
+  }
 
   async function send() {
     if (!input.trim()) return;
-
-    if (!roomId) {
-      setRoomError("No room is available yet. Try again in a moment.");
-      setStatus("Waiting for room to be ready…");
-      return;
-    }
+    const room = roomId || (await ensureRoom());
+    if (!room) return;
 
     const userMessage = { sender: "user", text: input };
-    setMessages((prev) => [...prev, userMessage]);
+    setMessages(prev => [...prev, userMessage]);
     setInput("");
     setTyping(true);
 
     try {
       setStatus("Sending to backend...");
-      const res = await fetch(`${apiBase}/rooms/${roomId}/ask`, {
+      const res = await fetch(`${apiBase}/rooms/${room}/ask`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -50,7 +60,7 @@ export default function ChatPanel({
           user_id: user.id,
           user_name: user.name,
           content: userMessage.text,
-          mode: "team", // default team mode
+          mode: "team",
         }),
       });
 
@@ -67,52 +77,38 @@ export default function ChatPanel({
         text: m.content,
         role: m.role,
       }));
-
       // Prefer coordinator / final assistant only
-      const reversed = [...serverMessages].reverse();
-      const coordinator = reversed.find((m) =>
+      const coordinator = [...serverMessages].reverse().find((m) =>
         (m.sender || "").toLowerCase().includes("coordinator")
       );
-      const lastAssistant = reversed.find((m) => m.role === "assistant");
+      const lastAssistant = [...serverMessages].reverse().find((m) => m.role === "assistant");
       const assistantMsg = coordinator || lastAssistant;
 
       setMessages((prev) => [
         ...prev,
-        assistantMsg || { sender: "agent", text: "Okay, noted.", role: "assistant" },
+        assistantMsg || { sender: "agent", text: "Got it.", role: "assistant" },
       ]);
       setStatus("");
     } catch (err) {
       setStatus(`Error: ${err?.message || "Request failed"}`);
-      setMessages((prev) => [
-        ...prev,
-        { sender: "ai", text: "Something went wrong. Try again." },
-      ]);
+      setMessages(prev => [...prev, { sender: "ai", text: "Something went wrong. Try again." }]);
     } finally {
       setTyping(false);
     }
   }
 
-  const formatStatus = useMemo(
-    () => ({
-      ask_received: ({ meta }) => `Ask received (${meta?.mode || "team"})`,
-      routing_agent: ({ meta }) => `Routing to ${meta?.agent || "agent"}`,
-      agent_reply: ({ meta }) => `Reply from ${meta?.agent || "agent"}`,
-      team_fanout_start: () => "Querying teammates...",
-      synthesizing: () => "Synthesizing responses...",
-      synthesis_complete: () => "Synthesis complete",
-    }),
-    []
-  );
+  const formatStatus = useMemo(() => ({
+    ask_received: ({ meta }) => `Ask received (${meta?.mode || "team"})`,
+    routing_agent: ({ meta }) => `Routing to ${meta?.agent || "agent"}`,
+    agent_reply: ({ meta }) => `Reply from ${meta?.agent || "agent"}`,
+    team_fanout_start: () => "Querying teammates...",
+    synthesizing: () => "Synthesizing drafts...",
+    synthesis_complete: () => "Synthesis complete",
+  }), []);
 
   useEffect(() => {
-    // Don't open SSE until we have a room and a real user id
-    if (!roomId || !user.id) return;
-
     const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
-    const url = `${base}/events?room_id=${encodeURIComponent(
-      roomId
-    )}&user_id=${encodeURIComponent(user.id)}`;
-    const source = new EventSource(url);
+    const source = new EventSource(`${base}/events`);
 
     source.onmessage = (event) => {
       try {
@@ -134,7 +130,7 @@ export default function ChatPanel({
     };
 
     return () => source.close();
-  }, [formatStatus, roomId, user.id]);
+  }, [formatStatus]);
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -147,11 +143,6 @@ export default function ChatPanel({
         {messages.map((m, i) => (
           <ChatBubble key={i} sender={m.sender} text={m.text} />
         ))}
-        {roomError && (
-          <div className="status-bubble error">
-            <span>{roomError}</span>
-          </div>
-        )}
         {status && (
           <div className="status-bubble">
             <span>{status}</span>
@@ -169,13 +160,10 @@ export default function ChatPanel({
           className="chat-input"
           placeholder="Ask Parallel OS..."
           value={input}
-          onChange={(e) => setInput(e.target.value)}
-          disabled={!roomId}
+          onChange={e => setInput(e.target.value)}
         />
-        <button type="submit" className="chat-send" disabled={!roomId}>
-          Send
-        </button>
+        <button type="submit" className="chat-send">Send</button>
       </form>
     </div>
   );
-} 
+}

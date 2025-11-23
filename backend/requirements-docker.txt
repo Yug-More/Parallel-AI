@@ -33,5 +33,5 @@ spoon-cli==0.1.0
 # chromadb==0.5.11
 # tiktoken==0.7.0
 # numpy==1.26.4
-
+os
 cors

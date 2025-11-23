@@ -25,14 +25,32 @@ export default function Login({ goSignup, goForgot, goDashboard }) {
         credentials: "include",
         body: JSON.stringify({ email, password }),
       });
+
       if (!res.ok) {
         const text = await res.text();
         console.error("Login failed", res.status, text);
         setStatus(`Invalid credentials (${res.status}).`);
-      } else {
-        setStatus("Signed in.");
-        goDashboard();
+        return;
       }
+
+      // Immediately confirm cookie works by hitting /me
+      try {
+        const meRes = await fetch(`${apiBase}/me`, {
+          credentials: "include",
+        });
+        if (meRes.ok) {
+          const me = await meRes.json();
+          console.log("Logged in as", me);
+          setStatus(`Signed in as ${me.name || me.email}.`);
+        } else {
+          console.warn("Login succeeded but /me failed", meRes.status);
+          setStatus("Signed in, but failed to load your profile.");
+        }
+      } catch (err) {
+        console.warn("Error fetching /me after login", err);
+      }
+
+      goDashboard();
     } catch (err) {
       console.error("Login error", err);
       setStatus("Login failed. See console.");
