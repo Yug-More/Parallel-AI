@@ -27,6 +27,7 @@ from models import (
     Notification as NotificationORM,
     MemoryRecord as MemoryORM,
     AgentProfile as AgentORM,
+    Task as TaskORM,
 )
 
 from openai import OpenAI
@@ -329,6 +330,8 @@ class NotificationCreate(BaseModel):
     source_message_id: Optional[str] = None
     priority: Optional[str] = None
     tags: List[str] = []
+    type: Optional[str] = "task"
+    task_id: Optional[str] = None
 
 
 class NotificationOut(BaseModel):
@@ -337,8 +340,32 @@ class NotificationOut(BaseModel):
     type: str
     title: str
     message: str
+    task_id: Optional[str] = None
     created_at: datetime
     is_read: bool
+
+    class Config:
+        from_attributes = True
+
+class RoleUpdate(BaseModel):
+    role: str
+
+class TaskIn(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    assignee_id: str
+
+class TaskUpdate(BaseModel):
+    status: str
+
+class TaskOut(BaseModel):
+    id: str
+    title: str
+    description: str
+    assignee_id: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
 
     class Config:
         from_attributes = True
@@ -498,12 +525,14 @@ def get_or_create_team_room(team_label: str, request: Request, db: Session = Dep
     user = require_user(request, db)
     org = get_or_create_org_for_user(db, user)
 
-    key = team_label.lower().strip()
-    room_name = CANONICAL_ROOMS.get(key, f"{team_label.title()} Room")
+    # Normalize to role-based room if available
+    label = (team_label or "").strip() or (user.role or "Team")
+    key = label.lower()
+    room_name = CANONICAL_ROOMS.get(key, f"{label.title()} Room")
 
     room = (
         db.query(RoomORM)
-        .filter(RoomORM.org_id == org.id, RoomORM.name == room_name)
+        .filter(RoomORM.org_id == org.id, func.lower(RoomORM.name) == func.lower(room_name))
         .first()
     )
     if not room:
@@ -664,9 +693,10 @@ def create_notification(user_id: str, payload: NotificationCreate, request: Requ
     notif = NotificationORM(
         id=str(uuid.uuid4()),
         user_id=user_id,
-        type="task",
+        type=payload.type or "task",
         title=payload.title,
         message=payload.message or payload.title,
+        task_id=payload.task_id,
         created_at=datetime.now(timezone.utc),
         is_read=False,
     )
@@ -674,6 +704,86 @@ def create_notification(user_id: str, payload: NotificationCreate, request: Requ
     db.commit()
     db.refresh(notif)
     return notif
+
+# -----------------------------
+# Team / Tasks management
+# -----------------------------
+@app.get("/team")
+def get_team(request: Request, db: Session = Depends(get_db)):
+    require_user(request, db)
+    users = db.query(UserORM).all()
+    members = []
+    for u in users:
+        members.append({
+            "id": u.id,
+            "name": u.name,
+            "roles": [u.role] if u.role else [],
+            "status": "active",
+        })
+    return {"members": members}
+
+@app.patch("/users/{user_id}/role", response_model=UserOut)
+def update_user_role(user_id: str, payload: RoleUpdate, request: Request, db: Session = Depends(get_db)):
+    require_user(request, db)
+    user = db.get(UserORM, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if ROLE_OPTIONS and payload.role not in ROLE_OPTIONS:
+        raise HTTPException(400, f"Role must be one of: {', '.join(ROLE_OPTIONS)}")
+    user.role = payload.role
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+@app.get("/tasks", response_model=List[TaskOut])
+def list_tasks(request: Request, db: Session = Depends(get_db)):
+    require_user(request, db)
+    tasks = db.query(TaskORM).order_by(TaskORM.created_at.desc()).all()
+    return tasks
+
+@app.post("/tasks", response_model=TaskOut)
+def create_task(payload: TaskIn, request: Request, db: Session = Depends(get_db)):
+    me = require_user(request, db)
+    task = TaskORM(
+        id=str(uuid.uuid4()),
+        title=payload.title,
+        description=payload.description or "",
+        assignee_id=payload.assignee_id,
+        status="new",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    # best effort notify assignee
+    notif = NotificationORM(
+        id=str(uuid.uuid4()),
+        user_id=payload.assignee_id,
+        type="task",
+        title=f"New task from {me.name}",
+        message=payload.title,
+        task_id=task.id,
+        created_at=datetime.now(timezone.utc),
+        is_read=False,
+    )
+    db.add(notif)
+    db.commit()
+    return task
+
+@app.patch("/tasks/{task_id}", response_model=TaskOut)
+def update_task(task_id: str, payload: TaskUpdate, request: Request, db: Session = Depends(get_db)):
+    require_user(request, db)
+    task = db.get(TaskORM, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    task.status = payload.status
+    task.updated_at = datetime.now(timezone.utc)
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
 
 def get_current_user(request: Request, db: Session) -> Optional[UserORM]:
     token = request.cookies.get("access_token")

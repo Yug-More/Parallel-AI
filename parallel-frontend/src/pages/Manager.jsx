@@ -8,6 +8,7 @@ import {
   createTask,
   updateTaskStatus,
   pushTaskNotification, // best-effort notify
+  updateUserRole,
 } from "../lib/tasksApi";
 
 import { useTasks } from "../context/TaskContext";
@@ -27,6 +28,11 @@ export default function Manager({
   const [title, setTitle] = useState("");
   const [desc, setDesc] = useState("");
   const [assignee, setAssignee] = useState("");
+  const roleOptions =
+    (import.meta.env.VITE_ROLE_OPTIONS || "Product,Engineering,Design,Data,Ops,Other")
+      .split(",")
+      .map((r) => r.trim())
+      .filter(Boolean);
 
   // Hide completed tasks immediately after marking complete
   const visibleTasks = useMemo(
@@ -67,6 +73,15 @@ export default function Manager({
       ...prev,
       [userId]: { ...prev[userId], [key]: !prev[userId]?.[key] },
     }));
+  };
+
+  const changeRole = async (userId, role) => {
+    try {
+      const updated = await updateUserRole(userId, role);
+      setTeam((prev) => prev.map((m) => (m.id === userId ? { ...m, roles: [updated.role] } : m)));
+    } catch (err) {
+      console.error("Failed to update role", err);
+    }
   };
 
   const create = async () => {
@@ -116,18 +131,31 @@ export default function Manager({
       {/* Left: Team + Roles + Permissions (placeholder UI) */}
       <div className="manager-card">
         <div className="manager-heading">
-          <div className="manager-title">Team</div>
-        </div>
+            <div className="manager-title">Team</div>
+          </div>
 
-        <div className="manager-list">
-          {team.length === 0 && <div>No teammates yet.</div>}
-          {team.map((m) => (
-            <div key={m.id} className="member">
-              <div style={{ width: "100%" }}>
-                <div style={{ fontWeight: 700 }}>{m.name}</div>
-                <div className="roles">
-                  {(m.roles || ["—"]).join(", ")}
-                </div>
+          <div className="manager-list">
+            {team.length === 0 && <div>No teammates yet.</div>}
+            {team.map((m) => (
+              <div key={m.id} className="member">
+                <div style={{ width: "100%" }}>
+                  <div style={{ fontWeight: 700 }}>{m.name}</div>
+                  <div className="roles">
+                    {(m.roles || ["—"]).join(", ")}
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <select
+                      value={m.roles?.[0] || ""}
+                      onChange={(e) => changeRole(m.id, e.target.value)}
+                    >
+                      <option value="">Select role</option>
+                      {roleOptions.map((opt) => (
+                        <option key={opt} value={opt}>
+                          {opt}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
                 {/* Permissions placeholder (not persisted) */}
                 <div

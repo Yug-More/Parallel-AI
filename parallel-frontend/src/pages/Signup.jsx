@@ -6,14 +6,20 @@ export default function Signup({ goLogin, goDashboard }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [role, setRole] = useState("");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
 
   const apiBase = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+  const roleOptions =
+    (import.meta.env.VITE_ROLE_OPTIONS || "Product,Engineering,Design,Data,Ops,Other")
+      .split(",")
+      .map((r) => r.trim())
+      .filter(Boolean);
 
   const submit = async () => {
-    if (!name || !email || !password) {
-      setStatus("Fill all fields.");
+    if (!name || !email || !password || !role) {
+      setStatus("Fill all fields (including role).");
       return;
     }
     setLoading(true);
@@ -24,7 +30,7 @@ export default function Signup({ goLogin, goDashboard }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ name, email, password }),
+        body: JSON.stringify({ name, email, password, role }),
       });
       if (!res.ok) {
         const text = await res.text();
@@ -63,6 +69,18 @@ export default function Signup({ goLogin, goDashboard }) {
           onChange={(e) => setName(e.target.value)}
           onKeyDown={onKey}
         />
+        <select
+          className="auth-input"
+          value={role}
+          onChange={(e) => setRole(e.target.value)}
+        >
+          <option value="">Select your role</option>
+          {roleOptions.map((opt) => (
+            <option key={opt} value={opt}>
+              {opt}
+            </option>
+          ))}
+        </select>
         <input
           className="auth-input"
           placeholder="Email"

@@ -1,6 +1,7 @@
 // Simple API adapter for tasks + team info
 const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
+// Always use backend (manager features)
 async function j(path, opts = {}) {
   const res = await fetch(`${API}${path}`, {
     credentials: "include",
@@ -72,6 +73,13 @@ export async function updateTaskStatus(taskId, status) {
   } catch {
     return { id: taskId, status };
   }
+}
+
+export async function updateUserRole(userId, role) {
+  return j(`/users/${userId}/role`, {
+    method: "PATCH",
+    body: JSON.stringify({ role }),
+  });
 }
 
 // ---- Notifications (assignee inbox) ----
