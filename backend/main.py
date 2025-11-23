@@ -16,7 +16,7 @@ from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from database import SessionLocal, engine, Base
+from database import SessionLocal, Base, engine
 from models import (
     User as UserORM,
     UserCredential as UserCredentialORM,
@@ -57,6 +57,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+def on_startup():
+    # Ensure all tables exist (dev shortcut instead of running migrations)
+    Base.metadata.create_all(bind=engine)
 
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret")
 ALGORITHM = "HS256"
@@ -167,7 +172,6 @@ Recent conversation in this room (oldest to newest):
 {history_text}
 """.strip()
 
-
 def build_system_prompt_for_room(
     db: Session,
     room: RoomORM,
@@ -178,13 +182,42 @@ def build_system_prompt_for_room(
     Build a system prompt for THIS user’s AI representative.
     The room is shared, but this agent only represents `user`.
     """
+    logger.info(
+        "=== build_system_prompt_for_room user=%s (%s) room=%s (%s) mode=%s ===",
+        getattr(user, "name", None),
+        getattr(user, "role", None),
+        getattr(room, "name", None),
+        getattr(room, "id", None),
+        mode,
+    )
+
     base_ctx = build_system_context(db, room)
+
+    # 🔹 Same-team activity summary + DEBUG LOGS
+    team_activity = ""
+    if getattr(user, "role", None):
+        logger.info(
+            "Calling build_team_activity_summary for user=%s role=%s",
+            user.name,
+            user.role,
+        )
+        team_activity = build_team_activity_summary(db, user.role)
+        logger.info(
+            "build_team_activity_summary returned:\n%s",
+            team_activity or "(empty)",
+        )
+    else:
+        logger.info(
+            "User %s has no role set; skipping team activity summary.",
+            user.name,
+        )
 
     rep_block = f"""
 You are the dedicated AI representative for this human teammate:
 
 - name: {user.name or "Unknown"}
 - id: {user.id}
+- role: {user.role or "(none specified)"}
 
 You speak AS their assistant.
 When you say "you", you are talking ONLY to this human.
@@ -200,16 +233,39 @@ The organization may contain many teammates using their own AI reps.
 - If the human asks about a teammate, answer from the perspective of THIS human.
 """
 
+    visibility_block = f"""
+You ONLY have detailed visibility into teammates that share this user's role/team.
+
+Here is the current same-team activity snapshot I have constructed for you:
+
+{team_activity or "(no visible recent activity for same-team teammates)"}
+
+Rules:
+
+- If the user asks what a same-team teammate (in the list above) is "up to",
+  summarize their recent visible work based on this snapshot and any recent
+  messages in this room.
+- If the user asks about someone who is NOT in the activity snapshot,
+  say clearly that you don't have visibility into that person's work right now.
+- Keep summaries short and concrete, e.g. "She's been doing quick math calculations"
+  or "He's been asking questions about frontend layout bugs."
+"""
+
     mode_block = f"Current interaction mode: {mode or 'team'}."
 
-    return f"""{base_ctx}
+    prompt = f"""{base_ctx}
 
 {rep_block}
 
 {team_block}
 
+{visibility_block}
+
 {mode_block}
 """.strip()
+
+    logger.info("=== final system prompt for %s ===\n%s", user.name, prompt)
+    return prompt
 
 
 def create_access_token(data: dict, expires_delta: timedelta = None):
@@ -351,15 +407,17 @@ class UserOut(BaseModel):
     email: str
     name: str
     created_at: datetime
+    # optional but nice so frontend can show it:
+    role: Optional[str] = None  
 
     class Config:
         from_attributes = True
-
 
 class CreateUserRequest(BaseModel):
     email: str
     name: str
     password: str
+    role: str        # 👈 NEW
 
 
 class CreateRoomRequest(BaseModel):
@@ -516,11 +574,6 @@ def room_to_response(db: Session, room: RoomORM) -> RoomResponse:
         messages=[to_message_out(m) for m in messages],
     )
 
-
-# ============================================================
-# AUTH ROUTES (Fix #3)
-# ============================================================
-
 @app.post("/auth/register", response_model=UserOut)
 def register(payload: CreateUserRequest, response: Response, db: Session = Depends(get_db)):
     exists = db.query(UserORM).filter(UserORM.email == payload.email).first()
@@ -531,6 +584,7 @@ def register(payload: CreateUserRequest, response: Response, db: Session = Depen
         id=str(uuid.uuid4()),
         email=payload.email,
         name=payload.name,
+        role=payload.role,                    # 👈 store role
         created_at=datetime.now(timezone.utc),
     )
     cred = UserCredentialORM(
@@ -542,7 +596,6 @@ def register(payload: CreateUserRequest, response: Response, db: Session = Depen
     db.add(cred)
     db.commit()
 
-    # Auto-login
     token = create_access_token({"sub": user.id})
     response.set_cookie(
         "access_token",
@@ -552,7 +605,6 @@ def register(payload: CreateUserRequest, response: Response, db: Session = Depen
         samesite="lax",
         path="/",
     )
-
     return user
 
 
@@ -625,21 +677,104 @@ CANONICAL_ROOMS = {
     "product": "Product Room",
 }
 
+@app.get("/team/activity")
+def get_team_activity(request: Request, db: Session = Depends(get_db)):
+    """
+    Return same-team members plus their last visible activity.
+
+    Short-term: we assume a single org per deployment, so we only
+    segment by role (team).
+    """
+    user = require_user(request, db)
+
+    if not user.role:
+        # No role set: show everyone
+        teammates = db.query(UserORM).all()
+    else:
+        teammates = (
+            db.query(UserORM)
+            .filter(UserORM.role == user.role)
+            .all()
+        )
+
+    members = []
+    for u in teammates:
+        last_msg = (
+            db.query(MessageORM, RoomORM)
+            .join(RoomORM, RoomORM.id == MessageORM.room_id)
+            .filter(MessageORM.sender_id == f"user:{u.id}")
+            .order_by(MessageORM.created_at.desc())
+            .first()
+        )
+
+        if last_msg:
+            msg, room = last_msg
+            text = (msg.content or "").strip()
+            if len(text) > 80:
+                text = text[:77] + "..."
+            last_activity = {
+                "room_name": room.name,
+                "message": text,
+                "at": msg.created_at.isoformat(),
+            }
+        else:
+            last_activity = None
+
+        members.append({
+            "id": u.id,
+            "name": u.name,
+            "role": u.role,
+            "last_activity": last_activity,
+        })
+
+    members.sort(
+        key=lambda m: (m["last_activity"]["at"] if m["last_activity"] else ""),
+        reverse=True,
+    )
+
+    return {"members": members}
+
 @app.get("/rooms/team/{team_label}")
-def get_or_create_team_room(team_label: str, request: Request, db: Session = Depends(get_db)):
+def get_or_create_team_room(
+    team_label: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Return (or create) the team room for this user.
+
+    - If team_label is "team" or empty, use the user's own role.
+    - Otherwise, treat team_label as a specific team name.
+    - (Optional) we can later re-add a strict guard to prevent cross-team access.
+    """
     user = require_user(request, db)
     org = get_or_create_org_for_user(db, user)
 
-    # Normalize to role-based room if available
-    label = (team_label or "").strip() or (user.role or "Team")
-    key = label.lower()
+    raw_label = (team_label or "").strip()
+
+    # "team" is just a placeholder meaning "my team"
+    if not raw_label or raw_label.lower() == "team":
+        label = user.role or "Team"
+    else:
+        label = raw_label
+
+    key = (label or "").lower()
+
+    # ❌ REMOVE the hard 403 that blocked you:
+    # if user.role and key != user.role.lower():
+    #     raise HTTPException(403, "You can only access your own team room for now.")
+
     room_name = CANONICAL_ROOMS.get(key, f"{label.title()} Room")
 
     room = (
         db.query(RoomORM)
-        .filter(RoomORM.org_id == org.id, func.lower(RoomORM.name) == func.lower(room_name))
+        .filter(
+            RoomORM.org_id == org.id,
+            func.lower(RoomORM.name) == func.lower(room_name),
+        )
         .first()
     )
+
     if not room:
         room = RoomORM(
             id=str(uuid.uuid4()),
@@ -649,8 +784,96 @@ def get_or_create_team_room(team_label: str, request: Request, db: Session = Dep
         )
         db.add(room)
         db.commit()
+        db.refresh(room)
 
     return {"room_id": room.id, "room_name": room.name}
+
+def build_team_activity_summary(
+    db: Session,
+    role: Optional[str],
+    max_users: int = 12,
+    max_msgs_per_user: int = 3,
+) -> str:
+    """
+    DEBUG VERSION: print absolutely everything about same-team users
+    and their recent messages so we can see why 'a' is “invisible”.
+    """
+    print("=== DEBUG: build_team_activity_summary called, role =", role)
+
+    if not role:
+        print("DEBUG: no role provided, returning empty summary")
+        return ""
+
+    # 1) who is on this team?
+    teammates = (
+        db.query(UserORM)
+        .filter(UserORM.role == role)
+        .order_by(UserORM.created_at.asc())
+        .limit(max_users)
+        .all()
+    )
+
+    print("DEBUG: teammates for role", role, "→", [
+        {"id": u.id, "name": u.name, "role": u.role} for u in teammates
+    ])
+
+    if not teammates:
+        return ""
+
+    lines: list[str] = []
+
+    for u in teammates:
+        print("\n--- DEBUG: teammate ---")
+        print("id:", u.id, "name:", u.name, "role:", u.role)
+
+        msgs = (
+            db.query(MessageORM)
+            .filter(
+                MessageORM.sender_id == f"user:{u.id}",
+                MessageORM.role == "user",
+            )
+            .order_by(MessageORM.created_at.desc())
+            .limit(max_msgs_per_user)
+            .all()
+        )
+
+        print(f"DEBUG: found {len(msgs)} recent user messages for", u.name)
+        for m in msgs:
+            preview = (m.content or "").replace("\n", " ")
+            if len(preview) > 80:
+                preview = preview[:77] + "..."
+            print(
+                "  msg:",
+                {
+                    "id": m.id,
+                    "room_id": m.room_id,
+                    "sender_id": m.sender_id,
+                    "role": m.role,
+                    "created_at": m.created_at.isoformat() if m.created_at else None,
+                    "content": preview,
+                },
+            )
+
+        if not msgs:
+            lines.append(f"- {u.name} has no recent visible activity I can see.")
+            continue
+
+        snippets: list[str] = []
+        for m in msgs:
+            text = (m.content or "").strip().replace("\n", " ")
+            if len(text) > 80:
+                text = text[:77] + "..."
+            snippets.append(f"\"{text}\"")
+
+        joined = "; ".join(reversed(snippets))
+        lines.append(f"- {u.name} has been working on: {joined}")
+
+    summary = "\n".join(lines)
+    print("=== DEBUG: build_team_activity_summary result ===")
+    print(summary or "(empty)")
+    print("===============================================")
+    return summary
+
 
 SUBSCRIBERS = []   # list[(queue, filters {room_id,user_id})]
 
