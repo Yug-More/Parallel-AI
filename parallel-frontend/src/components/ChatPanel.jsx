@@ -1,7 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import "./ChatPanel.css";
 import ChatBubble from "./ChatBubble";
-import TeamPanel from "./TeamPanel";
 
 export default function ChatPanel() {
   const [messages, setMessages] = useState([
@@ -132,8 +131,6 @@ export default function ChatPanel() {
 
   return (
     <div className="chat-wrapper glass">
-      <TeamPanel />
-
       <div className="chat-scroll">
         {messages.map((m, i) => (
           <ChatBubble key={i} sender={m.sender} text={m.text} />

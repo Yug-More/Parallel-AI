@@ -36,38 +36,31 @@
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
+  padding: 8px 0;
   border-radius: var(--radius-sm);
   background: transparent;
-  border: 1px solid transparent;
+  border: none;
   cursor: pointer;
   width: 100%;
   justify-content: center;
   transition: 0.18s ease;
 }
 
-.logo-button:hover {
-  border-color: var(--border);
-  background: rgba(255, 255, 255, 0.05);
+.logo-button:focus-visible {
+  outline: 2px solid var(--accent);
 }
 
 .sidebar-logo {
   width: 150px;
   height: auto;
   display: block;
-  filter: drop-shadow(0 1px 4px rgba(0,0,0,0.12)) var(--logo-filter, none);
+  filter: var(--logo-filter, drop-shadow(0 1px 4px rgba(0,0,0,0.12)));
   transition: transform 0.24s ease, filter 0.24s ease;
 }
 
 .logo-button:hover .sidebar-logo {
   transform: scale(1.02);
-  filter: drop-shadow(0 4px 12px rgba(0,0,0,0.18)) var(--logo-filter, none);
-}
-
-.logo-mark {
-  font-weight: 700;
-  color: var(--text);
-}
+  filter: drop-shadow(0 4px 12px rgba(0,0,0,0.18));
 }
 
 .sidebar-btn {
@@ -86,6 +79,12 @@
 .sidebar-btn:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.sidebar-btn.active {
+  border-color: var(--accent);
+  background: rgba(0, 196, 255, 0.08);
+  color: var(--text);
 }
 
 .sidebar-btn.ghost {
@@ -123,6 +122,9 @@
   border-radius: var(--radius-sm);
   border: 1px solid transparent;
   transition: 0.15s ease;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
 }
 
 .chat-title {
@@ -137,4 +139,22 @@
 
 .sidebar-bottom {
   margin-top: auto;
+}
+
+.theme-toggle-btn {
+  padding: 12px 16px;
+  width: 100%;
+  font-size: 14px;
+  font-weight: 600;
+  background: var(--accent);
+  color: black;
+  border: none;
+  border-radius: 14px;
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.theme-toggle-btn:hover {
+  background: var(--text);
+  color: var(--bg);
 }

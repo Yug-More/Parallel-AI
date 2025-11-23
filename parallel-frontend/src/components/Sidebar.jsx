@@ -1,8 +1,8 @@
 import ThemeToggle from "./ThemeToggle";
-import logo from "../assets/parallel-logo.svg"; 
+import logo from "../assets/parallel-logo.svg";
 import "./Sidebar.css";
 
-export default function Sidebar() {
+export default function Sidebar({ active = "Chat", onSelect = () => {} }) {
   const navItems = [
     { label: "Chat" },
     { label: "Team" },
@@ -21,15 +21,22 @@ export default function Sidebar() {
     <div className="sidebar glass">
       <div className="sidebar-top">
         <div className="sidebar-header">
-          <button className="logo-button" aria-label="New chat">
+          <button
+            className="logo-button"
+            aria-label="New chat"
+            onClick={() => onSelect("Chat")}
+          >
             <img src={logo} alt="Parallel Logo" className="sidebar-logo" />
-            <span className="logo-mark">| Parallel</span>
           </button>
         </div>
 
         <div className="nav-list">
           {navItems.map((item) => (
-            <button key={item.label} className="sidebar-btn ghost">
+            <button
+              key={item.label}
+              className={`sidebar-btn ghost ${active === item.label ? "active" : ""}`}
+              onClick={() => onSelect(item.label)}
+            >
               {item.label}
             </button>
           ))}
@@ -38,10 +45,15 @@ export default function Sidebar() {
         <div className="chat-list">
           <div className="section-label">Recent chats</div>
           <div className="chat-items">
-            {chats.map((chat, idx) => (
-              <div key={chat.id} className="chat-item">
+            {chats.map((chat) => (
+              <button
+                key={chat.id}
+                className="chat-item"
+                type="button"
+                onClick={() => onSelect("Chat")}
+              >
                 <span className="chat-title">{chat.title}</span>
-              </div>
+              </button>
             ))}
           </div>
         </div>
