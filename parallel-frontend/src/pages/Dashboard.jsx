@@ -4,6 +4,7 @@ import Sidebar from "../components/Sidebar";
 import ChatPanel from "../components/ChatPanel";
 import SummaryPanel from "../components/SummaryPanel";
 import TeamPanel from "../components/TeamPanel";
+import { GitTextEditorPanel } from "../features/ide/GitTextEditorPanel";
 
 function TeamView() {
   return (
@@ -35,17 +36,7 @@ function InboxView() {
 }
 
 function IdeView() {
-  return (
-    <div className="chat-wrapper glass">
-      <div className="panel-head">
-        <div>
-          <p className="eyebrow">IDE</p>
-          <h2>Coming soon</h2>
-        </div>
-      </div>
-      <p className="subhead">Reserved for future embedded coder.</p>
-    </div>
-  );
+  return <GitTextEditorPanel />;
 }
 
 export default function Dashboard() {
