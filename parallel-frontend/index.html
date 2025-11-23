@@ -1,13 +1,24 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>parallel-frontend</title>
+
+    <title>Parallel OS</title>
+
+    <!-- Force LIGHT THEME on initial load BEFORE React hydrates -->
+    <script>
+      // Ensures the app opens with your pearl background immediately
+      document.documentElement.setAttribute("data-theme", "light");
+      window.__PARALLEL_THEME = "light";
+    </script>
   </head>
+
   <body>
     <div id="root"></div>
+
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
