@@ -107,7 +107,7 @@ def get_default_client():
         return CLIENTS["coordinator"]
     for _, client in CLIENTS.items():
         return client
-    raise HTTPException(500, "No OpenAI client configured")
+    raise HTTPException(500, "No OpenAI client configured") # aa
 
 def build_system_context(db: Session, room: RoomORM) -> str:
     """
