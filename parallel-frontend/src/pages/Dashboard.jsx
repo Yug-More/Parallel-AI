@@ -1,70 +1,21 @@
 import { useEffect, useState } from "react";
+import ChatBubble from "../components/ChatBubble";
+import ThemeToggle from "../components/ThemeToggle";
 import "./Dashboard.css";
-import Sidebar from "../components/Sidebar";
-import ChatPanel from "../components/ChatPanel";
-import SummaryPanel from "../components/SummaryPanel";
-import TeamPanel from "../components/TeamPanel";
-import { GitTextEditorPanel } from "../features/ide/GitTextEditorPanel";
-import Manager from "./Manager";
-import NotificationsPanel from "../components/NotificationsPanel";
+import "../components/ChatPanel.css";
 
-function TeamView({ user, statuses }) {
-  return (
-    <div className="chat-wrapper glass">
-      <div className="panel-head">
-        <div>
-          <p className="eyebrow">Live work</p>
-          <h2>Team activity</h2>
-        </div>
-      </div>
-      <TeamPanel user={user} statuses={statuses} />
-      <p className="subhead">Updates stream here when Team is selected.</p>
-    </div>
-  );
-}
-
-function InboxView({ inbox }) {
-  return (
-    <div className="chat-wrapper glass">
-      <div className="panel-head">
-        <div>
-          <p className="eyebrow">Inbox</p>
-          <h2>Captured tasks</h2>
-        </div>
-      </div>
-      {inbox.length === 0 && <p className="subhead">No tasks yet.</p>}
-      <div className="inbox-list">
-        {inbox.map((task) => (
-          <div className="inbox-item" key={task.id}>
-            <div className="inbox-title">{task.content}</div>
-            <div className="inbox-meta">
-              <span>{task.status}</span>
-              {task.priority && <span>{task.priority}</span>}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function IdeView() {
-  return <GitTextEditorPanel />;
-}
+const apiBase = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
 export default function Dashboard() {
-  const [activeTool, setActiveTool] = useState("Team");
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [user, setUser] = useState({ id: "demo-user", name: "You" });
-  const [activityLog, setActivityLog] = useState([]);
-  const [teamStatuses, setTeamStatuses] = useState([]);
-  const [roomId, setRoomId] = useState(null);
-  const [roomData, setRoomData] = useState(null);
-  const [inbox, setInbox] = useState([]);
-  const [roomError, setRoomError] = useState("");
-  const apiBase = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+  const [user, setUser] = useState({ id: null, name: "You" });
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [online, setOnline] = useState([]);
+  const [activity, setActivity] = useState([]);
 
-  // --- Fetch current user ---
+  // Auth: fetch current user
   useEffect(() => {
     const fetchMe = async () => {
       try {
@@ -72,173 +23,186 @@ export default function Dashboard() {
         if (res.ok) {
           const data = await res.json();
           setUser({ id: data.id, name: data.name || "You" });
+        } else {
+          window.location.reload();
         }
-      } catch (err) {
-        // ignore; keep default
+      } catch {
+        window.location.reload();
       }
     };
     fetchMe();
-  }, [apiBase]);
+  }, []);
 
-  // --- Resolve canonical team room once user is known ---
-  useEffect(() => {
-    if (!user.id || roomId) return;
-
-    const resolveRoom = async () => {
-      try {
-        // If you later add user.role, replace "team" with user.role
-        const teamLabel = "team";
-        const res = await fetch(`${apiBase}/rooms/team/${teamLabel}`, {
-          credentials: "include",
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          console.error("Failed to resolve team room", res.status, text);
-          setRoomError("Could not resolve team room.");
-          return;
-        }
-        const data = await res.json();
-        setRoomId(data.room_id);
-      } catch (err) {
-        console.error("Error resolving team room", err);
-        setRoomError("Could not resolve team room.");
-      }
-    };
-
-    resolveRoom();
-  }, [user.id, roomId, apiBase]);
-
-  // --- Activity / status log ---
-  useEffect(() => {
-    const label =
-      activeTool === "IDE"
-        ? "Development"
-        : activeTool === "Inbox"
-        ? "Inbox review"
-        : activeTool === "Team"
-        ? "Team activity"
-        : "In chat";
-
-    const entry = {
-      id: `${Date.now()}`,
-      state: label,
-      detail: `Switched to ${activeTool}`,
-      at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      name: user.name || "You",
-    };
-    setActivityLog((prev) => [entry, ...prev].slice(0, 6));
-    setTeamStatuses([{ name: user.name || "You", role: label, state: "active" }]);
-  }, [activeTool, user.name]);
-
-  // --- Fetch room details (poll) ---
-  useEffect(() => {
-    if (!roomId) return;
-
-    const fetchRoom = async () => {
-      try {
-        const res = await fetch(`${apiBase}/rooms/${roomId}`, {
-          credentials: "include",
-        });
-        if (res.ok) {
-          const data = await res.json();
-          setRoomData(data);
-        }
-      } catch (err) {
-        // ignore
-      }
-    };
-    fetchRoom();
-    const id = setInterval(fetchRoom, 5000);
-    return () => clearInterval(id);
-  }, [roomId, apiBase]);
-
-  // --- Inbox polling ---
+  // Messages for current user
   useEffect(() => {
     if (!user.id) return;
-    const fetchInbox = async () => {
+    const fetchMessages = async () => {
       try {
-        const res = await fetch(`${apiBase}/users/${user.id}/inbox`, {
-          credentials: "include",
-        });
+        const res = await fetch(`${apiBase}/messages`, { credentials: "include" });
         if (res.ok) {
           const data = await res.json();
-          setInbox(data || []);
+          setMessages(data || []);
         }
-      } catch (err) {
-        // ignore
+      } catch (e) {
+        console.error(e);
       }
     };
-    fetchInbox();
-    const id = setInterval(fetchInbox, 7000);
+    fetchMessages();
+  }, [user.id]);
+
+  const refreshTeamActivity = async () => {
+    try {
+      const [onRes, actRes] = await Promise.all([
+        fetch(`${apiBase}/online`, { credentials: "include" }),
+        fetch(`${apiBase}/activity`, { credentials: "include" }),
+      ]);
+      if (onRes.ok) {
+        const data = await onRes.json();
+        setOnline(data.members || []);
+      }
+      if (actRes.ok) {
+        const data = await actRes.json();
+        setActivity(data || []);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Online members + activity feed (poll every 2s for real-time updates)
+  useEffect(() => {
+    if (!user.id) return;
+    refreshTeamActivity();
+    const id = setInterval(refreshTeamActivity, 2000);
     return () => clearInterval(id);
-  }, [user.id, apiBase]);
+  }, [user.id]);
+
+  const sendMessage = async (e) => {
+    e?.preventDefault();
+    const text = input.trim();
+    if (!text || loading) return;
+    setInput("");
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`${apiBase}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ content: text }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Request failed (${res.status})`);
+      }
+      await res.json();
+      // Refetch messages and activity so UI is in sync
+      const [msgRes, actRes] = await Promise.all([
+        fetch(`${apiBase}/messages`, { credentials: "include" }),
+        fetch(`${apiBase}/activity`, { credentials: "include" }),
+      ]);
+      if (msgRes.ok) setMessages(await msgRes.json());
+      if (actRes.ok) setActivity(await actRes.json());
+    } catch (err) {
+      setError(err?.message || "Send failed");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleLogout = async () => {
     try {
       await fetch(`${apiBase}/auth/logout`, { method: "POST", credentials: "include" });
-    } catch {
-      // ignore
-    } finally {
-      window.location.reload();
-    }
+    } catch (_) {}
+    window.location.reload();
   };
 
-  const renderRight = () => {
-    if (activeTool === "Manager") return <Manager currentUser={user} />;
-    if (activeTool === "Team")
-      return (
-        <>
-          <TeamView user={user} statuses={teamStatuses} />
-          <NotificationsPanel user={user} />
-        </>
-      );
-    if (activeTool === "Inbox") return <InboxView inbox={inbox} />;
-    if (activeTool === "IDE") return <IdeView />;
-    return (
-      <SummaryPanel
-        user={user}
-        activeTool={activeTool}
-        activityLog={activityLog}
-        roomData={roomData}
-      />
-    );
-  };
-
-  const containerClass = sidebarOpen
-    ? "dashboard-container"
-    : "dashboard-container collapsed";
+  const displayMessages = messages.length
+    ? messages
+    : [{ sender_name: "agent", role: "assistant", content: `Hey ${user.name} — how can I help today?` }];
 
   return (
-    <div className={containerClass}>
-      {sidebarOpen ? (
-        <Sidebar
-          active={activeTool}
-          onSelect={setActiveTool}
-          onToggle={() => setSidebarOpen(false)}
-          onLogout={handleLogout}
-        />
-      ) : (
-        <div className="sidebar-toggle-shell">
-          <button
-            className="sidebar-toggle"
-            onClick={() => setSidebarOpen(true)}
-            aria-label="Expand sidebar"
-          >
-            ‹›
+    <div className="dashboard-simple">
+      <header className="dashboard-header">
+        <span className="dashboard-user">{user.name}</span>
+        <div className="dashboard-actions">
+          <ThemeToggle />
+          <button type="button" className="logout-btn" onClick={handleLogout}>
+            Log out
           </button>
         </div>
-      )}
+      </header>
 
-      {activeTool === "Manager" ? (
-        <div style={{ gridColumn: "span 2", width: "100%" }}>
-          <Manager currentUser={user} />
+      <div className="dashboard-panels">
+        <div className="chat-wrapper glass chat-panel">
+          <div className="chat-scroll">
+            {displayMessages.map((m) => (
+              <ChatBubble
+                key={m.id}
+                sender={m.role === "user" ? "user" : "ai"}
+                text={m.content}
+              />
+            ))}
+            {error && <div className="status-bubble error">{error}</div>}
+            {loading && (
+              <div className="status-bubble">
+                <span>Thinking...</span>
+                <span className="status-dots">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
+              </div>
+            )}
+          </div>
+          <form className="input-container" onSubmit={sendMessage}>
+            <input
+              className="chat-input"
+              placeholder="Ask your agent..."
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              disabled={loading}
+            />
+            <button type="submit" className="chat-send" disabled={loading}>
+              Send
+            </button>
+          </form>
         </div>
-      ) : (
-        <>
-          <ChatPanel user={user} roomId={roomId} />
-          {renderRight()}
-        </>
-      )}
+
+        <aside className="activity-panel glass">
+          <div className="activity-header">
+            <h3 className="activity-title">Team activity</h3>
+            <button
+              type="button"
+              className="activity-refresh-btn"
+              onClick={refreshTeamActivity}
+              title="Refresh"
+              aria-label="Refresh team activity"
+            >
+              Refresh
+            </button>
+          </div>
+          <div className="online-row">
+            {online.map((m) => (
+              <div key={m.id} className="online-member">
+                <span className={`online-dot ${m.online ? "online" : "offline"}`} />
+                <span>{m.name}</span>
+              </div>
+            ))}
+          </div>
+          <div className="activity-feed">
+            {activity.length === 0 && (
+              <p className="activity-empty">No activity yet. Send a message to see updates here.</p>
+            )}
+            {activity.map((a) => (
+              <div key={a.id} className="activity-item">
+                <span className="activity-name">{a.user_name}:</span>{" "}
+                <span className="activity-summary">{a.summary}</span>
+              </div>
+            ))}
+          </div>
+        </aside>
+      </div>
     </div>
   );
 }
