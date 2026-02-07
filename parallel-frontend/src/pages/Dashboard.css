@@ -42,7 +42,7 @@
 .dashboard-panels {
   flex: 1;
   display: grid;
-  grid-template-columns: 1fr 320px;
+  grid-template-columns: 1fr 340px;
   gap: 0;
   min-height: 0;
   overflow: hidden;
@@ -57,16 +57,281 @@
   border-right: 1px solid var(--border);
 }
 
+/* ── mode bar ── */
+.mode-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0;
+  flex-wrap: wrap;
+}
+
+.mode-btn {
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+}
+
+.mode-btn:hover {
+  background: rgba(0, 196, 255, 0.08);
+  border-color: var(--accent);
+}
+
+.mode-btn.active {
+  background: linear-gradient(135deg, rgba(0, 196, 255, 0.2), rgba(98, 231, 255, 0.15));
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.mode-icon {
+  font-size: 15px;
+}
+
+.toolkit-select {
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-glass);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  max-width: 220px;
+}
+
+/* ── mode info banner ── */
+.mode-info {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  background: rgba(0, 196, 255, 0.04);
+}
+
+.mode-info .inline-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  font-size: 12px;
+  padding: 0;
+}
+
+.mode-info .inline-link:hover {
+  color: #00e0ff;
+}
+
+/* ── sidebar ── */
 .activity-panel {
   display: flex;
   flex-direction: column;
   padding: 16px;
-  overflow: hidden;
+  overflow-y: auto;
   border-radius: 0;
   border: none;
   background: var(--panel-glass);
 }
 
+/* ── tool status cards ── */
+.tools-status {
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tools-status .activity-title {
+  margin-bottom: 10px;
+}
+
+.tool-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tool-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  font-size: 13px;
+}
+
+.tool-card strong {
+  display: block;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.tool-card p {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.tool-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+
+.tool-card.enabled .tool-indicator {
+  background: #22c55e;
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.3);
+}
+
+.tool-card.disabled .tool-indicator {
+  background: #ef4444;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.3);
+}
+
+.phone-number {
+  font-family: monospace;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+
+.tunnel-row {
+  margin-top: 4px !important;
+}
+
+.tunnel-link {
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.tunnel-link:hover {
+  color: #00e0ff;
+}
+
+.connect-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.connect-btn {
+  padding: 4px 8px;
+  font-size: 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent);
+  background: rgba(0, 196, 255, 0.1);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.connect-btn:hover {
+  background: rgba(0, 196, 255, 0.2);
+}
+
+.connect-btn.connected {
+  border-color: #22c55e;
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.refresh-status-btn {
+  border-color: var(--border);
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+/* ── summary bar ── */
+.summary-toggle-btn {
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent);
+  background: rgba(0, 196, 255, 0.1);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.summary-toggle-btn:hover {
+  background: rgba(0, 196, 255, 0.2);
+}
+
+.summary-bar {
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(0, 196, 255, 0.04);
+}
+
+.summary-form {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.summary-label {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.summary-email-input {
+  padding: 7px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-glass);
+  color: var(--text);
+  font-size: 13px;
+  min-width: 220px;
+}
+
+.summary-email-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.summary-send-btn {
+  padding: 7px 16px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: linear-gradient(135deg, #00c4ff, #62e7ff);
+  color: #000;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.summary-send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.summary-cancel-btn {
+  padding: 7px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* ── team activity ── */
 .activity-header {
   display: flex;
   align-items: center;
@@ -166,4 +431,35 @@
 .status-bubble.error {
   background: rgba(239, 68, 68, 0.15);
   border-color: rgba(239, 68, 68, 0.4);
+}
+
+.voice-mode-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 6px;
+  display: inline-block;
+  margin-top: 4px;
+}
+
+.voice-mode-badge.live {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.voice-mode-badge.record {
+  background: rgba(234, 179, 8, 0.15);
+  color: #eab308;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+}
+
+@media (max-width: 900px) {
+  .dashboard-panels {
+    grid-template-columns: 1fr;
+  }
+  .activity-panel {
+    max-height: 250px;
+    border-top: 1px solid var(--border);
+  }
 }
